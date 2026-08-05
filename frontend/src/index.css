@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+body {
+  margin: 0;
+  background-color: #EEF2F9;
+  font-family: 'Inter', sans-serif;
+  color: #1E2A3A;
+}
+
+/* Layout Container */
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* Sidebar Styling */
+.sidebar {
+  width: 260px;
+  background-color: #F4F7FC;
+  border-right: 1px solid #D2D9E6;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.sidebar-header {
+  padding: 24px;
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.sidebar-nav {
+  padding: 16px;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  color: #6B7A90;
+  text-decoration: none;
+  font-weight: 500;
+  margin-bottom: 8px;
+  transition: 0.2s;
+}
+
+.sidebar-link:hover, .sidebar-link.active {
+  background-color: #EEF2F9;
+  color: #3E7BFA;
+}
+
+/* Main Content Area */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* Topbar Styling */
+.topbar {
+  height: 70px;
+  background-color: #F4F7FC;
+  border-bottom: 1px solid #D2D9E6;
+  padding: 0 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* Neumorphic Cards & Elements */
+.neu-card {
+  background-color: #F4F7FC;
+  box-shadow: 8px 8px 16px #D2D9E6, -8px -8px 16px #FFFFFF;
+  border-radius: 20px;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+.neu-button {
+  background-color: #F4F7FC;
+  box-shadow: 5px 5px 10px #D2D9E6, -5px -5px 10px #FFFFFF;
+  border-radius: 12px;
+  padding: 10px 20px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  color: #3E7BFA;
+  transition: 0.2s;
+}
+
+.neu-button:hover {
+  box-shadow: 3px 3px 6px #D2D9E6, -3px -3px 6px #FFFFFF;
+}
+
+.neu-button-primary {
+  background-color: #3E7BFA;
+  color: white;
+  box-shadow: 5px 5px 10px #D2D9E6, -5px -5px 10px #FFFFFF;
+}
+
+/* Dashboard Grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background-color: #F4F7FC;
+  box-shadow: 8px 8px 16px #D2D9E6, -8px -8px 16px #FFFFFF;
+  border-radius: 20px;
+  padding: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: bold;
+  color: #3E7BFA;
+  margin-top: 4px;
+}
