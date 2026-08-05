@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #EEF2F9; padding: 24px;">
+  <div style="max-width: 480px; margin: 0 auto; background: #F4F7FC; border-radius: 20px; padding: 32px;">
+    <h2 style="color: #1E2A3A;">Booking Confirmed ✅</h2>
+    <p style="color: #6B7A90;">Hi {{ client_name }}, your booking has been received!</p>
+
+    <div style="background: #EEF2F9; border-radius: 16px; padding: 16px; margin: 20px 0;">
+      <p style="margin: 4px 0;"><strong>Service:</strong> {{ service_name }}</p>
+      <p style="margin: 4px 0;"><strong>Date:</strong> {{ booking_date }}</p>
+      <p style="margin: 4px 0;"><strong>Time:</strong> {{ start_time }} - {{ end_time }}</p>
+      <p style="margin: 4px 0;"><strong>Status:</strong> {{ status }}</p>
+      <p style="margin: 4px 0;"><strong>Price:</strong> ${{ price }}</p>
+    </div>
+
+    <p style="color: #6B7A90; font-size: 13px;">
+      If you need to reschedule or cancel, please contact us.
+    </p>
+    <p style="color: #6B7A90; font-size: 12px;">— CRM & Booking Team</p>
+  </div>
+</body>
+</html>

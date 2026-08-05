@@ -1,0 +1,12 @@
+Booking Confirmed
+
+Hi {{ client_name }},
+
+Your booking has been received:
+Service: {{ service_name }}
+Date: {{ booking_date }}
+Time: {{ start_time }} - {{ end_time }}
+Status: {{ status }}
+Price: ${{ price }}
+
+— CRM & Booking Team
