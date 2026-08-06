@@ -1,5 +1,6 @@
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
@@ -91,6 +92,12 @@ class ClientViewSet(viewsets.ModelViewSet):
         self.instance = self.get_object()
         serializer = self.get_serializer(self.instance)
         return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def me(self, request):
+        """Return the Client record tied to the authenticated user's own account, creating it if needed."""
+        client = Client.get_or_create_for_user(request.user)
+        return Response(ClientSerializer(client).data)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()

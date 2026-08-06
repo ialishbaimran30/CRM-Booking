@@ -23,3 +23,14 @@ class Client(models.Model):
 
     def __str__(self):
         return self.full_name
+
+    @classmethod
+    def get_or_create_for_user(cls, user):
+        """Resolve the Client record for an authenticated user's own account, matching by email."""
+        client = cls.objects.filter(email__iexact=user.email).first()
+        if client:
+            return client
+        return cls.objects.create(
+            full_name=user.full_name or user.email.split("@")[0],
+            email=user.email,
+        )

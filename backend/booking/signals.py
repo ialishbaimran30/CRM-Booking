@@ -9,4 +9,6 @@ from .models import Booking
 def send_confirmation_on_booking_created(sender, instance, created, **kwargs):
     """Every new booking automatically triggers a confirmation email to the client."""
     if created:
-        send_booking_confirmation_email(instance)
+        # Stashed on the instance (not persisted) so the response can report
+        # whether the email actually went out.
+        instance._email_sent = send_booking_confirmation_email(instance)

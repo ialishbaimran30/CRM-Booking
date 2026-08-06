@@ -1,0 +1,12 @@
+Your Requested Appointment Slot is Now Available
+
+Good news!
+
+The appointment slot you requested is now available.
+Date: {{ booking_date }}
+Time: {{ start_time }} - {{ end_time }}
+
+Book this slot before it is taken by another client:
+{{ book_now_url }}
+
+— CRM & Booking Team

@@ -12,7 +12,7 @@ class DashboardSummaryAPIView(APIView):
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request):
         user_id = request.user.id
-        booking_v = cache.get(f"booking_version_{user_id}", 1)
+        booking_v = cache.get("booking_version_global", 1)
         payment_v = cache.get(f"payment_version_{user_id}", 1)
         client_v = cache.get(f"client_version_{user_id}", 1)
         
@@ -33,7 +33,7 @@ class PeriodicReportAPIView(APIView):
         user_id = request.user.id
         period = request.query_params.get("period", "monthly")
         
-        booking_v = cache.get(f"booking_version_{user_id}", 1)
+        booking_v = cache.get("booking_version_global", 1)
         payment_v = cache.get(f"payment_version_{user_id}", 1)
         client_v = cache.get(f"client_version_{user_id}", 1)
         

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #EEF2F9; padding: 24px;">
+  <div style="max-width: 480px; margin: 0 auto; background: #F4F7FC; border-radius: 20px; padding: 32px;">
+    <h2 style="color: #1E2A3A;">Appointment Successfully Rescheduled 🔄</h2>
+    <p style="color: #6B7A90;">Hi {{ client_name }}, your appointment has been rescheduled.</p>
+
+    <div style="background: #FDE8E8; border-radius: 16px; padding: 16px; margin: 20px 0;">
+      <p style="margin: 0 0 6px 0; font-weight: bold; color: #9B1C1C;">Previous Booking</p>
+      <p style="margin: 4px 0;"><strong>Date:</strong> {{ old_booking_date }}</p>
+      <p style="margin: 4px 0;"><strong>Time:</strong> {{ old_start_time }} - {{ old_end_time }}</p>
+    </div>
+
+    <div style="background: #DEF7EC; border-radius: 16px; padding: 16px; margin: 20px 0;">
+      <p style="margin: 0 0 6px 0; font-weight: bold; color: #03543F;">Updated Booking</p>
+      <p style="margin: 4px 0;"><strong>Service:</strong> {{ service_name }}</p>
+      <p style="margin: 4px 0;"><strong>Date:</strong> {{ booking_date }}</p>
+      <p style="margin: 4px 0;"><strong>Time:</strong> {{ start_time }} - {{ end_time }}</p>
+      <p style="margin: 4px 0;"><strong>Status:</strong> {{ status }}</p>
+    </div>
+
+    <p style="color: #6B7A90; font-size: 13px;">
+      If you did not request this change, please contact us right away.
+    </p>
+    <p style="color: #6B7A90; font-size: 12px;">— CRM & Booking Team</p>
+  </div>
+</body>
+</html>

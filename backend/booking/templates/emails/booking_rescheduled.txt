@@ -1,0 +1,19 @@
+Appointment Successfully Rescheduled
+
+Hi {{ client_name }},
+
+Your appointment has been rescheduled.
+
+Previous Booking:
+Date: {{ old_booking_date }}
+Time: {{ old_start_time }} - {{ old_end_time }}
+
+Updated Booking:
+Service: {{ service_name }}
+Date: {{ booking_date }}
+Time: {{ start_time }} - {{ end_time }}
+Status: {{ status }}
+
+If you did not request this change, please contact us right away.
+
+— CRM & Booking Team

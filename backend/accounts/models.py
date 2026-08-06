@@ -20,3 +20,21 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+class TeamRoleAssignment(models.Model):
+    ROLE_CHOICES = [
+        ('CRM Administrator', 'CRM Administrator'),
+        ('Operations Manager', 'Operations Manager'),
+        ('Sales Manager', 'Sales Manager'),
+        ('Finance Manager', 'Finance Manager'),
+        ('Business Analyst', 'Business Analyst'),
+    ]
+
+    role_name = models.CharField(max_length=100, choices=ROLE_CHOICES, unique=True)
+    assigned_user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_team_roles'
+    )
+    assigned_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.role_name} -> {self.assigned_user.email if self.assigned_user else 'Unassigned'}"

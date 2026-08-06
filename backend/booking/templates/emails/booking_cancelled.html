@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; background-color: #EEF2F9; padding: 24px;">
+  <div style="max-width: 480px; margin: 0 auto; background: #F4F7FC; border-radius: 20px; padding: 32px;">
+    <h2 style="color: #1E2A3A;">{% if deleted %}Booking Removed{% else %}Booking Cancelled{% endif %} ❌</h2>
+    <p style="color: #6B7A90;">
+      Hi {{ client_name }}, your booking has been {% if deleted %}removed{% else %}cancelled{% endif %}.
+    </p>
+
+    <div style="background: #EEF2F9; border-radius: 16px; padding: 16px; margin: 20px 0;">
+      <p style="margin: 4px 0;"><strong>Service:</strong> {{ service_name }}</p>
+      <p style="margin: 4px 0;"><strong>Date:</strong> {{ booking_date }}</p>
+      <p style="margin: 4px 0;"><strong>Time:</strong> {{ start_time }} - {{ end_time }}</p>
+    </div>
+
+    <p style="color: #6B7A90; font-size: 13px;">
+      This slot is now available again. If this was a mistake or you'd like to rebook, please visit the booking portal.
+    </p>
+    <p style="color: #6B7A90; font-size: 12px;">— CRM & Booking Team</p>
+  </div>
+</body>
+</html>

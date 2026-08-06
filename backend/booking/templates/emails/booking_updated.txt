@@ -1,0 +1,14 @@
+Your Booking Has Been Updated
+
+Hi {{ client_name }},
+
+Here are your current booking details:
+Service: {{ service_name }}
+Date: {{ booking_date }}
+Time: {{ start_time }} - {{ end_time }}
+Status: {{ status }}
+Price: ${{ price }}
+
+If you have any questions about this change, please contact us.
+
+— CRM & Booking Team

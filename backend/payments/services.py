@@ -66,7 +66,7 @@ class BillingService:
         user_id = booking.created_by_id
         _bump_version(f"invoice_version_{user_id}")
         _bump_version(f"payment_version_{user_id}")
-        _bump_version(f"booking_version_{user_id}")
+        _bump_version("booking_version_global")
         return payment
 
     @staticmethod
@@ -91,5 +91,5 @@ class BillingService:
         user_id = booking.created_by_id
         _bump_version(f"invoice_version_{user_id}")
         _bump_version(f"payment_version_{user_id}")
-        _bump_version(f"booking_version_{user_id}")
+        _bump_version("booking_version_global")
         return invoice

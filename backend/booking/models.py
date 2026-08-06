@@ -36,5 +36,41 @@ class Booking(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            # DB-level backstop against two active bookings racing for the same
+            # slot (the standard hourly grid always shares identical start
+            # times, so this closes the concurrent-double-booking window that
+            # a plain serializer-level check can't).
+            models.UniqueConstraint(
+                fields=["booking_date", "start_time"],
+                condition=models.Q(status__in=["PENDING", "CONFIRMED"]),
+                name="unique_active_booking_slot",
+            )
+        ]
+
     def __str__(self):
         return f"{self.service_name} for {self.client.full_name} on {self.booking_date}"
+
+
+class Waitlist(models.Model):
+    """A client waiting to be notified when a specific booking slot frees up."""
+
+    client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name="waitlist_entries")
+    booking_date = models.DateField()
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["client", "booking_date", "start_time", "end_time"],
+                name="unique_waitlist_entry_per_client_slot",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.client.full_name} waiting for {self.booking_date} {self.start_time}"

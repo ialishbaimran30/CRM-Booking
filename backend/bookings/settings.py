@@ -126,6 +126,10 @@ SIMPLE_JWT = {
 }
 CORS_ALLOWED_ORIGINS = ["http://localhost:3000"]
 
+# Base URL of the frontend SPA, used to build links embedded in emails (e.g. the
+# waitlist "Book Now" link).
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
+
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587

@@ -1,0 +1,12 @@
+{% if deleted %}Booking Removed{% else %}Booking Cancelled{% endif %}
+
+Hi {{ client_name }},
+
+Your booking has been {% if deleted %}removed{% else %}cancelled{% endif %}:
+Service: {{ service_name }}
+Date: {{ booking_date }}
+Time: {{ start_time }} - {{ end_time }}
+
+This slot is now available again. If this was a mistake or you'd like to rebook, please visit the booking portal.
+
+— CRM & Booking Team
