@@ -1,5 +1,6 @@
 from django.core.cache import cache
 from django.db.models import Q, Sum
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -7,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from accounts.permissions import IsAdmin, IsStaffMember, is_admin
 from .models import Invoice, Payment
+from .pdf import render_invoice_pdf
 from .serializers import InvoiceSerializer, PaymentSerializer
 from .services import BillingService
 
@@ -124,6 +126,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         _bump_version(f"invoice_version_{request.user.id}")
         _bump_version(f"payment_version_{request.user.id}")
         return Response(InvoiceSerializer(invoice).data)
+
+    @action(detail=True, methods=["get"])
+    def pdf(self, request, pk=None):
+        """Return the invoice as a downloadable/printable PDF."""
+        invoice = self.get_object()
+        pdf_bytes = render_invoice_pdf(invoice)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="invoice-{invoice.invoice_number}.pdf"'
+        return response
 
     @action(detail=True, methods=["post"])
     def refund(self, request, pk=None):
