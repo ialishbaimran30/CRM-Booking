@@ -5,10 +5,12 @@ from rest_framework.decorators import action
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import time, timedelta, datetime
 from django.db import transaction, IntegrityError
-from .models import Booking, Waitlist
+from accounts.permissions import IsAdminOrReadOnly, is_staff_member
+from notifications.services import CommunicationService
+from .models import Booking, Service, Waitlist
 from clients.models import Client
 from payments.models import Payment, Invoice
-from .serializers import BookingSerializer, WaitlistSerializer
+from .serializers import BookingSerializer, ServiceSerializer, WaitlistSerializer
 from .slots import generate_daily_slots
 from .emails import (
     notify_waitlist_for_freed_slot,
@@ -18,9 +20,36 @@ from .emails import (
 )
 from django.core.cache import cache
 from django.utils import timezone
+import logging
 import threading
 
+logger = logging.getLogger(__name__)
+
+
+def _notify_waitlist_slot_available_in_app(booking_date, start_time, end_time):
+    """In-app companion to notify_waitlist_for_freed_slot (booking/emails.py,
+    unchanged) — additive only, never allowed to raise."""
+    try:
+        entries = Waitlist.objects.filter(
+            booking_date=booking_date, start_time=start_time, end_time=end_time
+        ).select_related("client")
+        for entry in entries:
+            CommunicationService.notify_waitlist_slot_available(entry)
+    except Exception:
+        logger.exception("Failed to send in-app waitlist-availability notifications")
+
 ACTIVE_STATUSES = (Booking.BookingStatus.PENDING, Booking.BookingStatus.CONFIRMED)
+
+
+class ServiceViewSet(viewsets.ModelViewSet):
+    """The Admin-defined catalog of bookable services and their hourly rates.
+    Any authenticated user (Staff or Client) may browse it to book; only the
+    Admin may define/edit rates."""
+
+    queryset = Service.objects.all().order_by("name")
+    serializer_class = ServiceSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    pagination_class = None
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -41,9 +70,9 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        # Staff/admin accounts have full visibility over all bookings, including
-        # ones created by clients through the Client Portal.
-        if user.is_staff or user.is_superuser:
+        # Staff (Admin or Booking Manager) have full visibility over all bookings,
+        # including ones created by clients through the Client Portal.
+        if is_staff_member(user):
             return Booking.objects.all()
 
         # Strict Client Isolation: clients can only access bookings they created themselves.
@@ -62,7 +91,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
-        is_staff = user.is_staff or user.is_superuser
+        is_staff = is_staff_member(user)
         my_client = None if is_staff else Client.get_or_create_for_user(user)
 
         existing = list(
@@ -180,6 +209,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         threading.Thread(target=send_async_email, daemon=True).start()
         self._bump_cache_version(self.request.user.id)
 
+        try:
+            CommunicationService.notify_booking_event(booking, actor=self.request.user, action="created")
+        except Exception:
+            logger.exception("Failed to send in-app booking-created notifications for booking %s", booking.id)
+
     def perform_update(self, serializer):
         old_instance = serializer.instance
         old_date = old_instance.booking_date
@@ -222,22 +256,36 @@ class BookingViewSet(viewsets.ModelViewSet):
         rescheduled = booking.status in ACTIVE_STATUSES and slot_changed
         if just_cancelled or rescheduled:
             booking._waitlist_notified_count = notify_waitlist_for_freed_slot(old_date, old_start, old_end)
+            _notify_waitlist_slot_available_in_app(old_date, old_start, old_end)
 
         # Notify the booking's own client — exactly one email per update,
-        # matching whichever change is most significant to them.
-        if just_cancelled:
-            booking._client_notification_sent = send_booking_cancelled_email(booking)
-        elif rescheduled:
-            booking._client_notification_sent = send_booking_rescheduled_email(booking, old_date, old_start, old_end)
-        else:
-            other_change = (
-                old_service_name != booking.service_name
-                or old_price != booking.price
-                or old_payment_status != booking.payment_status
-                or old_status != booking.status
-            )
-            if other_change:
-                booking._client_notification_sent = send_booking_updated_email(booking)
+        # matching whichever change is most significant to them. The in-app
+        # + WebSocket notification (Admin/Booking Manager/Client, per
+        # notify_booking_event's recipient rule) mirrors the exact same
+        # classification, so one update still produces one logical event.
+        try:
+            if just_cancelled:
+                booking._client_notification_sent = send_booking_cancelled_email(booking)
+                CommunicationService.notify_booking_event(booking, actor=self.request.user, action="cancelled")
+            elif rescheduled:
+                booking._client_notification_sent = send_booking_rescheduled_email(booking, old_date, old_start, old_end)
+                CommunicationService.notify_booking_event(
+                    booking, actor=self.request.user, action="rescheduled",
+                    previous_value=f"{old_date.strftime('%d %b')}, {old_start.strftime('%I:%M %p')}",
+                    new_value=f"{booking.booking_date.strftime('%d %b')}, {booking.start_time.strftime('%I:%M %p')}",
+                )
+            else:
+                other_change = (
+                    old_service_name != booking.service_name
+                    or old_price != booking.price
+                    or old_payment_status != booking.payment_status
+                    or old_status != booking.status
+                )
+                if other_change:
+                    booking._client_notification_sent = send_booking_updated_email(booking)
+                    CommunicationService.notify_booking_event(booking, actor=self.request.user, action="updated")
+        except Exception:
+            logger.exception("Failed to send in-app booking-update notifications for booking %s", booking.id)
 
     def update(self, request, *args, **kwargs):
         try:
@@ -271,6 +319,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         # instance (and its client FK) won't exist to read after .delete().
         if old_status in ACTIVE_STATUSES:
             send_booking_cancelled_email(instance, deleted=True)
+            try:
+                CommunicationService.notify_booking_event(instance, actor=self.request.user, action="cancelled")
+            except Exception:
+                logger.exception("Failed to send in-app booking-deleted notifications for booking %s", instance.id)
 
         with transaction.atomic():
             # Clean up related payment/invoice records explicitly to prevent orphans
@@ -286,6 +338,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Deleting an active booking frees its slot up just like a cancel does.
         if old_status in ACTIVE_STATUSES:
             notify_waitlist_for_freed_slot(old_date, old_start, old_end)
+            _notify_waitlist_slot_available_in_app(old_date, old_start, old_end)
 
 
 class WaitlistViewSet(viewsets.ModelViewSet):
@@ -299,7 +352,7 @@ class WaitlistViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_staff or user.is_superuser:
+        if is_staff_member(user):
             return Waitlist.objects.all()
         return Waitlist.objects.filter(client__email__iexact=user.email)
 

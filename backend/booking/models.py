@@ -3,6 +3,26 @@ from django.conf import settings
 from clients.models import Client
 
 
+class Service(models.Model):
+    """An Admin-defined, bookable service with an hourly rate. The single
+    source of truth for pricing — Booking.rate_snapshot is copied from this
+    at booking time so later rate changes never retroactively alter past
+    bookings."""
+
+    name = models.CharField(max_length=255, unique=True)
+    hourly_rate = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} (${self.hourly_rate}/hr)"
+
+
 class Booking(models.Model):
     """Represents a booking for a client."""
 
@@ -18,6 +38,12 @@ class Booking(models.Model):
         REFUNDED = "REFUNDED", "Refunded"
 
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name="bookings")
+    service = models.ForeignKey(
+        Service, on_delete=models.SET_NULL, null=True, blank=True, related_name="bookings"
+    )
+    # Denormalized display copy of service.name at booking time — kept so
+    # existing search/display code (invoices, reports) doesn't need a join,
+    # and so it still reads sensibly if the Service is later renamed/removed.
     service_name = models.CharField(max_length=255)
     booking_date = models.DateField()
     start_time = models.TimeField()
@@ -26,7 +52,12 @@ class Booking(models.Model):
         max_length=20, choices=BookingStatus.choices, default=BookingStatus.PENDING
     )
     notes = models.TextField(blank=True)
+    # The final, backend-calculated total price (duration_hours * rate_snapshot
+    # when a Service is used). Never trust a client-supplied value for this.
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    # The service's hourly rate captured at booking time — a permanent
+    # snapshot so later Service.hourly_rate edits never change this booking's price.
+    rate_snapshot = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     payment_status = models.CharField(
         max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING
     )

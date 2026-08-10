@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { NeumorphicCard } from '../components/common/NeumorphicCard';
 import { StatusBadge } from '../components/common/StatusBadge';
 import toast from 'react-hot-toast';
+import { extractErrorMessage } from '../utils/apiError';
 
-export default function PaymentsView() {
+export default function PaymentsView({ isAdmin }) {
   const [invoices, setInvoices] = useState([]);
   const [summary, setSummary] = useState({ total_revenue: 0, total_pending: 0, total_refunded: 0, this_month_revenue: 0 });
   const [loading, setLoading] = useState(true);
@@ -32,13 +33,20 @@ export default function PaymentsView() {
   });
 
   const fetchSummary = useCallback(async () => {
+    // Revenue analytics are Admin-only — the backend rejects this for a Booking Manager anyway.
+    if (!isAdmin) return;
     try {
       const res = await fetch('/api/payments/payments/summary/', { headers: authHeaders() });
-      if (res.ok) setSummary(await res.json());
+      if (res.ok) {
+        setSummary(await res.json());
+      } else {
+        toast.error('Failed to load payment summary.');
+      }
     } catch (err) {
       console.error(err);
+      toast.error('Network error while loading payment summary.');
     }
-  }, []);
+  }, [isAdmin]);
 
   const fetchInvoices = useCallback(async () => {
     try {
@@ -56,15 +64,31 @@ export default function PaymentsView() {
       
       // Client-side date filter safeguard with inclusive end time
       if (startDate || endDate) {
-        results = results.filter(inv => {
-          const itemDateStr = inv.paid_at ? inv.paid_at.split('T')[0] : (inv.issued_date ? inv.issued_date.split('T')[0] : null);
+        results = results.filter((inv) => {
+          const itemDateStr = inv.paid_at
+            ? inv.paid_at.split('T')[0]
+            : inv.issued_date
+              ? inv.issued_date.split('T')[0]
+              : null;
+
           if (!itemDateStr) return false;
 
-          const itemTime = new Date(itemDateStr).getTime();
-          const startTime = startDate ? new Date(startDate).getTime() : 0;
-          const endTime = endDate ? new Date(endDate).setHours(23, 59, 59, 999) : Number.MAX_SAFE_INTEGER;
+          // From + To: inclusive date range
+          if (startDate && endDate) {
+            return itemDateStr >= startDate && itemDateStr <= endDate;
+          }
 
-          return itemTime >= startTime && itemTime <= endTime;
+          // From only: show ONLY that selected day
+          if (startDate) {
+            return itemDateStr === startDate;
+          }
+
+          // To only: show everything up to and including that date
+          if (endDate) {
+            return itemDateStr <= endDate;
+          }
+
+          return true;
         });
       }
       setInvoices(results);
@@ -127,25 +151,29 @@ export default function PaymentsView() {
     e.preventDefault();
     try {
       const isRefund = actionType === 'REFUND';
-      const url = `/api/payments/invoices/${selectedInvoice.id}/${isRefund ? 'refund' : 'pay'}/`;
+      const isUnpaid = actionType === 'UNPAID';
+      const endpoint = isRefund ? 'refund' : isUnpaid ? 'unpaid' : 'pay';
+      const url = `/api/payments/invoices/${selectedInvoice.id}/${endpoint}/`;
       const body = isRefund
         ? { refund_reason: refundReason }
+        : isUnpaid
+        ? {}
         : {
             payment_method: paymentMethod,
-            ...(applyDiscount ? { discount_amount: discountAmount || 0, coupon_code: couponCode } : {}),
+            ...(isAdmin && applyDiscount ? { discount_amount: discountAmount || 0, coupon_code: couponCode } : {}),
           };
 
       const res = await fetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.detail || 'Action failed.');
+        toast.error(extractErrorMessage(data, isRefund ? 'Refund failed.' : isUnpaid ? 'Failed to mark unpaid.' : 'Payment failed.'));
         return;
       }
 
-      toast.success(isRefund ? 'Payment refunded!' : 'Payment marked as paid!');
+      toast.success(isRefund ? 'Payment refunded!' : isUnpaid ? 'Payment marked as unpaid!' : 'Payment marked as paid!');
       setShowActionModal(false);
-      
+
       // Trigger cross-tab/module synchronization
       localStorage.setItem('payment_sync_timestamp', Date.now().toString());
 
@@ -153,7 +181,7 @@ export default function PaymentsView() {
       fetchSummary();
     } catch (err) {
       console.error(err);
-      toast.error('Something went wrong.');
+      toast.error('Network error. Please check your connection and try again.');
     }
   };
 
@@ -162,8 +190,23 @@ export default function PaymentsView() {
     setShowInvoiceModal(true);
   };
 
-  const printInvoice = () => {
-    window.print();
+  const printInvoice = async () => {
+    if (!invoiceToPrint) return;
+    try {
+      const res = await fetch(`/api/payments/invoices/${invoiceToPrint.id}/pdf/`, { headers: authHeaders() });
+      if (!res.ok) {
+        toast.error('Failed to generate invoice PDF.');
+        return;
+      }
+      const blob = await res.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      window.open(blobUrl, '_blank');
+      // Revoke after a delay so the newly opened tab has time to load it.
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 60000);
+    } catch (err) {
+      console.error(err);
+      toast.error('Network error while generating the invoice PDF.');
+    }
   };
 
   return (
@@ -173,24 +216,26 @@ export default function PaymentsView() {
         <p className="text-sm text-[#6B7A90]">Track invoices, paid transactions, and refund statuses.</p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <NeumorphicCard className="p-4">
-          <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Total Revenue</p>
-          <h3 className="text-2xl font-extrabold text-[#3FBF8F] mt-1">${summary.total_revenue}</h3>
-        </NeumorphicCard>
-        <NeumorphicCard className="p-4">
-          <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Pending Amount</p>
-          <h3 className="text-2xl font-extrabold text-[#E0A800] mt-1">${summary.total_pending}</h3>
-        </NeumorphicCard>
-        <NeumorphicCard className="p-4">
-          <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Refunded</p>
-          <h3 className="text-2xl font-extrabold text-[#9B1C1C] mt-1">${summary.total_refunded}</h3>
-        </NeumorphicCard>
-        <NeumorphicCard className="p-4">
-          <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">This Month's Revenue</p>
-          <h3 className="text-2xl font-extrabold text-[#3E7BFA] mt-1">${summary.this_month_revenue}</h3>
-        </NeumorphicCard>
-      </div>
+      {isAdmin && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <NeumorphicCard className="p-4">
+            <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Total Revenue</p>
+            <h3 className="text-2xl font-extrabold text-[#3FBF8F] mt-1">${summary.total_revenue}</h3>
+          </NeumorphicCard>
+          <NeumorphicCard className="p-4">
+            <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Pending Amount</p>
+            <h3 className="text-2xl font-extrabold text-[#E0A800] mt-1">${summary.total_pending}</h3>
+          </NeumorphicCard>
+          <NeumorphicCard className="p-4">
+            <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">Refunded</p>
+            <h3 className="text-2xl font-extrabold text-[#9B1C1C] mt-1">${summary.total_refunded}</h3>
+          </NeumorphicCard>
+          <NeumorphicCard className="p-4">
+            <p className="text-xs font-bold text-[#6B7A90] uppercase tracking-wider">This Month's Revenue</p>
+            <h3 className="text-2xl font-extrabold text-[#3E7BFA] mt-1">${summary.this_month_revenue}</h3>
+          </NeumorphicCard>
+        </div>
+      )}
 
       <div className="bg-[#F4F7FC] rounded-2xl p-4 shadow-[8px_8px_16px_#d0d9e8,-8px_-8px_16px_#ffffff] flex flex-col lg:flex-row gap-4 items-center justify-between">
         <input
@@ -265,6 +310,11 @@ export default function PaymentsView() {
                         </button>
                       )}
                       {inv.status === 'PAID' && (
+                        <button onClick={() => handleOpenActionModal(inv, 'UNPAID')} className="bg-[#E0A800]/15 text-[#E0A800] px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
+                          Mark Unpaid
+                        </button>
+                      )}
+                      {isAdmin && inv.status === 'PAID' && (
                         <button onClick={() => handleOpenActionModal(inv, 'REFUND')} className="bg-[#9B1C1C]/15 text-[#9B1C1C] px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer">
                           Refund
                         </button>
@@ -278,12 +328,12 @@ export default function PaymentsView() {
         </div>
       </NeumorphicCard>
 
-      {/* Mark Paid / Refund Modal */}
+      {/* Mark Paid / Mark Unpaid / Refund Modal */}
       {showActionModal && (
         <div className="fixed inset-0 flex justify-center items-center z-50 p-4 bg-black/40">
           <div className="bg-[#F4F7FC] rounded-2xl p-6 w-full max-w-md shadow-xl">
             <h3 className="text-lg font-bold text-[#1E2A3A] mb-4">
-              {actionType === 'PAID' ? 'Mark Payment as Paid' : 'Refund Payment'}
+              {actionType === 'PAID' ? 'Mark Payment as Paid' : actionType === 'UNPAID' ? 'Mark Payment as Unpaid' : 'Refund Payment'}
             </h3>
             <form onSubmit={handleProcessAction} className="space-y-4">
               {actionType === 'PAID' ? (
@@ -298,24 +348,32 @@ export default function PaymentsView() {
                     </select>
                   </div>
 
-                  <label className="flex items-center gap-2 text-sm text-[#1E2A3A] cursor-pointer">
-                    <input type="checkbox" checked={applyDiscount} onChange={(e) => setApplyDiscount(e.target.checked)} />
-                    Apply discount / coupon
-                  </label>
+                  {isAdmin && (
+                    <>
+                      <label className="flex items-center gap-2 text-sm text-[#1E2A3A] cursor-pointer">
+                        <input type="checkbox" checked={applyDiscount} onChange={(e) => setApplyDiscount(e.target.checked)} />
+                        Apply discount / coupon
+                      </label>
 
-                  {applyDiscount && (
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs font-bold text-[#6B7A90] uppercase block mb-1">Discount ($)</label>
-                        <input type="number" min="0" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} className="w-full bg-[#EEF2F9] rounded-xl px-3 py-2 text-sm focus:outline-none" />
-                      </div>
-                      <div>
-                        <label className="text-xs font-bold text-[#6B7A90] uppercase block mb-1">Coupon Code</label>
-                        <input type="text" value={couponCode} onChange={(e) => setCouponCode(e.target.value)} className="w-full bg-[#EEF2F9] rounded-xl px-3 py-2 text-sm focus:outline-none" />
-                      </div>
-                    </div>
+                      {applyDiscount && (
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-bold text-[#6B7A90] uppercase block mb-1">Discount ($)</label>
+                            <input type="number" min="0" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} className="w-full bg-[#EEF2F9] rounded-xl px-3 py-2 text-sm focus:outline-none" />
+                          </div>
+                          <div>
+                            <label className="text-xs font-bold text-[#6B7A90] uppercase block mb-1">Coupon Code</label>
+                            <input type="text" value={couponCode} onChange={(e) => setCouponCode(e.target.value)} className="w-full bg-[#EEF2F9] rounded-xl px-3 py-2 text-sm focus:outline-none" />
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
+              ) : actionType === 'UNPAID' ? (
+                <p className="text-sm text-[#6B7A90]">
+                  This will remove the recorded payment and set the invoice back to unpaid. Continue?
+                </p>
               ) : (
                 <div>
                   <label className="text-xs font-bold text-[#6B7A90] uppercase block mb-1">Refund Reason</label>

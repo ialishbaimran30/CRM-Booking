@@ -1,12 +1,13 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 
-export default function Sidebar() {
+export default function Sidebar({ isAdmin }) {
   const location = useLocation();
   const isActive = (path) => location.pathname.startsWith(path);
 
+
   return (
-    <div className="w-64 bg-[#EEF2F9] border-r border-[#d0d9e8]/50 min-h-screen flex flex-col justify-between p-6">
+    <div className="w-64 bg-[#EEF2F9] border-r border-[#d0d9e8]/50 h-screen flex-shrink-0 flex flex-col justify-between p-6 overflow-y-auto">
       <div>
         <div className="mb-8">
           <h1 className="text-xl font-bold text-[#3E7BFA] tracking-tight">CRM & Booking</h1>
@@ -14,16 +15,18 @@ export default function Sidebar() {
         </div>
 
         <nav className="flex flex-col gap-2">
-          <Link
-            to="/dashboard"
-            className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
-              isActive('/dashboard')
-                ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
-                : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
-            }`}
-          >
-            <span>📊</span> Dashboard
-          </Link>
+          {isAdmin && (
+            <Link
+              to="/dashboard"
+              className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                isActive('/dashboard')
+                  ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                  : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+              }`}
+            >
+              <span>📊</span> Dashboard
+            </Link>
+          )}
           <Link
             to="/clients"
             className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
@@ -45,6 +48,26 @@ export default function Sidebar() {
             <span>📅</span> Bookings
           </Link>
           <Link
+            to="/bookings/available-slots"
+            className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+              isActive('/bookings/available-slots')
+                ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+            }`}
+          >
+            <span>🗓️</span> Available Slots
+          </Link>
+          <Link
+            to="/waitlist"
+            className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+              isActive('/waitlist')
+                ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+            }`}
+          >
+            <span>⏳</span> Waitlist
+          </Link>
+          <Link
             to="/payments"
             className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
               isActive('/payments')
@@ -54,16 +77,42 @@ export default function Sidebar() {
           >
             <span>💳</span> Payments
           </Link>
-          <Link
-            to="/reports"
-            className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
-              isActive('/reports')
-                ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
-                : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
-            }`}
-          >
-            <span>📊</span> Reports
-          </Link>
+          {isAdmin && (
+            <Link
+              to="/reports"
+              className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                isActive('/reports')
+                  ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                  : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+              }`}
+            >
+              <span>📊</span> Reports
+            </Link>
+          )}
+          {isAdmin && (
+            <Link
+              to="/team-management"
+              className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                isActive('/team-management')
+                  ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                  : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+              }`}
+            >
+              <span>🛡️</span> Team Management
+            </Link>
+          )}
+          {isAdmin && (
+            <Link
+              to="/notification-history"
+              className={`flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                isActive('/notification-history')
+                  ? 'bg-[#3E7BFA] text-white shadow-[4px_4px_10px_rgba(62,123,250,0.3)]'
+                  : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
+              }`}
+            >
+              <span>🔔</span> Notification History
+            </Link>
+          )}
         </nav>
       </div>
     </div>

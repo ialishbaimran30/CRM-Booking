@@ -2,13 +2,15 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from accounts.permissions import IsAdmin
 from .services import ReportService
 from django.utils.decorators import method_decorator
 from django.views.decorators.vary import vary_on_headers
 from django.core.cache import cache
 
 class DashboardSummaryAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Reports are an Admin-only module — Booking Managers have no access.
+    permission_classes = [IsAuthenticated, IsAdmin]
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request):
         user_id = request.user.id
@@ -27,7 +29,8 @@ class DashboardSummaryAPIView(APIView):
 
 
 class PeriodicReportAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Reports are an Admin-only module — Booking Managers have no access.
+    permission_classes = [IsAuthenticated, IsAdmin]
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request):
         user_id = request.user.id

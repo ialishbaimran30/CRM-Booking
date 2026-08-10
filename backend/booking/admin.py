@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import Booking, Waitlist
+from .models import Booking, Service, Waitlist
+
+
+@admin.register(Service)
+class ServiceAdmin(admin.ModelAdmin):
+    list_display = ("name", "hourly_rate", "is_active", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("name", "description")
 
 
 @admin.register(Booking)

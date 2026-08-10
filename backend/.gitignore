@@ -6,10 +6,15 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
-
+env
 # Django
 staticfiles/
 media/
 
 # Environment secrets
 .env
+
+# Environment variables
+.env
+.env.*
+!.env.example

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -62,6 +63,10 @@ class Payment(models.Model):
     refund_reason = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PAID)
     paid_at = models.DateTimeField(null=True, blank=True)
+    # Who performed the mark-paid/refund action (Admin or Booking Manager) — an audit trail.
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
 
     def save(self, *args, **kwargs):
         if not self.transaction_id:

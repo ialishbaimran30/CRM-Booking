@@ -5,6 +5,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from accounts.permissions import IsAdmin, IsStaffMember, is_admin
 from .models import Invoice, Payment
 from .serializers import InvoiceSerializer, PaymentSerializer
 from .services import BillingService
@@ -16,9 +17,10 @@ def _bump_version(key):
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
+    # Payments is a Staff-only module (Admin or Booking Manager) — Clients never see it.
     queryset = Invoice.objects.select_related("booking", "booking__client").order_by("-id")
     serializer_class = InvoiceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
     pagination_class = None
 
     def get_queryset(self):
@@ -75,6 +77,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         _bump_version(f"invoice_version_{self.request.user.id}")
         _bump_version(f"payment_version_{self.request.user.id}")
 
+    def get_permissions(self):
+        # Refunds, and generic create/update/delete of invoices (which would
+        # otherwise let any Staff member bypass the pay/unpaid/refund actions'
+        # own checks), are Admin-only. A Booking Manager keeps list/retrieve/pay/unpaid.
+        if self.action in ("refund", "create", "update", "partial_update", "destroy"):
+            return [IsAuthenticated(), IsAdmin()]
+        return super().get_permissions()
+
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):
         """Mark invoice as paid — applying discount/coupon validation."""
@@ -83,11 +93,31 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         discount_amount = request.data.get("discount_amount")
         coupon_code = request.data.get("coupon_code", "")
 
+        if (discount_amount not in (None, "") or coupon_code) and not is_admin(request.user):
+            return Response(
+                {"detail": "Only an Admin can apply discounts or coupons."}, status=403
+            )
+
         try:
             BillingService.mark_invoice_paid(
                 invoice, payment_method=payment_method,
                 discount_amount=discount_amount, coupon_code=coupon_code,
+                marked_by=request.user,
             )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        _bump_version(f"invoice_version_{request.user.id}")
+        _bump_version(f"payment_version_{request.user.id}")
+        return Response(InvoiceSerializer(invoice).data)
+
+    @action(detail=True, methods=["post"])
+    def unpaid(self, request, pk=None):
+        """Reverse a paid invoice back to unpaid."""
+        invoice = self.get_object()
+
+        try:
+            BillingService.mark_invoice_unpaid(invoice)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 
@@ -101,7 +131,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         reason = request.data.get("refund_reason", "")
 
         try:
-            BillingService.refund_invoice(invoice, reason=reason)
+            BillingService.refund_invoice(invoice, reason=reason, marked_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 
@@ -111,10 +141,17 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
 
 class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    # Payments is a Staff-only module (Admin or Booking Manager) — Clients never see it.
     queryset = Payment.objects.select_related("invoice", "invoice__booking", "invoice__booking__client").order_by("-id")
     serializer_class = PaymentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
     pagination_class = None
+
+    def get_permissions(self):
+        # Revenue analytics are an Admin-only capability.
+        if self.action == "summary":
+            return [IsAuthenticated(), IsAdmin()]
+        return super().get_permissions()
 
     def list(self, request, *args, **kwargs):
         user_id = request.user.id

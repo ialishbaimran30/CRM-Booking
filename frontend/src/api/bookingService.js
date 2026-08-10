@@ -25,6 +25,12 @@ export const bookingService = {
     return response.data;
   },
 
+  // Get the Admin-defined catalog of bookable services (id, name, hourly_rate)
+  getServices: async () => {
+    const response = await api.get('/services/');
+    return response.data;
+  },
+
   // Update booking status or details
   updateBooking: async (id, bookingData) => {
     const response = await api.patch(`/bookings/${id}/`, bookingData);

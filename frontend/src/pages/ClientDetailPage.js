@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { clientService } from '../api/clientService';
+import { notifyApiError } from '../utils/apiError';
 
 export default function ClientDetailPage() {
   const { id } = useParams();
@@ -10,7 +11,10 @@ export default function ClientDetailPage() {
   useEffect(() => {
     clientService.getClientDetail(id)
       .then(data => setClient(data))
-      .catch(err => console.error(err))
+      .catch(err => {
+        console.error(err);
+        notifyApiError(err, "Failed to load client profile.");
+      })
       .finally(() => setLoading(false));
   }, [id]);
 

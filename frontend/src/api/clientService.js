@@ -8,6 +8,10 @@ export const clientService = {
     const response = await api.get(`/clients/${id}/`);
     return response.data;
   },
+  getMyClient: async () => {
+    const response = await api.get('/clients/me/');
+    return response.data;
+  },
   createClient: async (clientData) => {
     const response = await api.post('/clients/', clientData);
     return response.data;

@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { bookingService } from '../api/bookingService';
 import { clientService } from '../api/clientService';
+import AvailableSlotsPanel from '../components/AvailableSlotsPanel';
 import toast from 'react-hot-toast';
+import { notifyApiError } from '../utils/apiError';
+import { getCurrentUser, isStaffUser } from '../utils/session';
 
 const StatusBadge = ({ status }) => {
   const statusStyles = {
@@ -37,8 +41,15 @@ const PaymentStatusBadge = ({ status }) => {
 };
 
 export default function BookingListPage() {
+  const isClientPortal = !isStaffUser(getCurrentUser());
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const slotsPagePath = isClientPortal ? '/client-portal/available-slots' : '/bookings/available-slots';
+
   const [bookings, setBookings] = useState([]);
   const [clients, setClients] = useState([]);
+  const [services, setServices] = useState([]);
+  const [myClient, setMyClient] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -49,15 +60,16 @@ export default function BookingListPage() {
   const [showModal, setShowModal] = useState(false);
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
+  const [serviceTouched, setServiceTouched] = useState(false);
+  const [showEditSlots, setShowEditSlots] = useState(false);
+  const [bookingViaSlotLink, setBookingViaSlotLink] = useState(false);
 
   const [formData, setFormData] = useState({
     client: '',
-    service_name: '',
+    service: '',
     booking_date: '',
     start_time: '10:00',
     end_time: '11:00',
-    price: '',
-    payment_status: 'PENDING',
     notes: '',
   });
 
@@ -66,35 +78,79 @@ export default function BookingListPage() {
     return timeStr.substring(0, 5);
   };
 
+  // Client-side estimate only — purely informational. The backend always
+  // recalculates and validates the real total from the Service's hourly
+  // rate before saving; this preview just mirrors that math for display.
+  const estimatePrice = (serviceId, startTime, endTime) => {
+    const service = services.find((s) => String(s.id) === String(serviceId));
+    if (!service || !startTime || !endTime) return null;
+    const [sh, sm] = startTime.split(':').map(Number);
+    const [eh, em] = endTime.split(':').map(Number);
+    const durationHours = (eh * 60 + em - (sh * 60 + sm)) / 60;
+    if (!(durationHours > 0)) return null;
+    const rate = parseFloat(service.hourly_rate);
+    return { service, durationHours, rate, total: durationHours * rate };
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [bookingData, clientData] = await Promise.all([
+      // The Clients list (/api/clients/) is a Staff-only CRM endpoint — Clients
+      // are correctly denied access to it, so only fetch it in staff mode.
+      // In the Client Portal, `myClient` (their own record) is what's needed instead.
+      const [bookingData, clientData, myClientData, serviceData] = await Promise.all([
         bookingService.getBookings(),
-        clientService.getClients()
+        isClientPortal ? Promise.resolve([]) : clientService.getClients(),
+        isClientPortal ? clientService.getMyClient() : Promise.resolve(null),
+        bookingService.getServices(),
       ]);
 
-      let bookingsArray = [];
+      if (myClientData) {
+        setMyClient(myClientData);
+      }
+      setServices(Array.isArray(serviceData) ? serviceData : (serviceData?.results || []));
+
+      let rawBookings = [];
       if (Array.isArray(bookingData)) {
-        bookingsArray = bookingData;
+        rawBookings = bookingData;
       } else if (bookingData && Array.isArray(bookingData.results)) {
-        bookingsArray = bookingData.results;
+        rawBookings = bookingData.results;
       } else if (bookingData && Array.isArray(bookingData.data)) {
-        bookingsArray = bookingData.data;
+        rawBookings = bookingData.data;
       }
 
-      let clientsArray = [];
+      // Deduplicate bookings based on id or pk to prevent duplicate key errors during pagination/search
+      const uniqueBookingsMap = new Map();
+      rawBookings.forEach(b => {
+        const uniqueId = b.id || b.pk;
+        if (uniqueId !== undefined && uniqueId !== null) {
+          uniqueBookingsMap.set(uniqueId, b);
+        } else {
+          uniqueBookingsMap.set(Math.random(), b);
+        }
+      });
+
+      let rawClients = [];
       if (Array.isArray(clientData)) {
-        clientsArray = clientData;
+        rawClients = clientData;
       } else if (clientData && Array.isArray(clientData.results)) {
-        clientsArray = clientData.results;
+        rawClients = clientData.results;
       }
 
-      setBookings(bookingsArray);
-      setClients(clientsArray);
+      const uniqueClientsMap = new Map();
+      rawClients.forEach(c => {
+        const uniqueId = c.id || c.pk;
+        if (uniqueId !== undefined && uniqueId !== null) {
+          uniqueClientsMap.set(uniqueId, c);
+        }
+      });
+
+      setBookings(Array.from(uniqueBookingsMap.values()));
+      setClients(Array.from(uniqueClientsMap.values()));
     } catch (err) {
       setError('Failed to fetch bookings.');
       console.error(err);
+      notifyApiError(err, 'Failed to fetch bookings.');
     } finally {
       setLoading(false);
     }
@@ -104,67 +160,102 @@ export default function BookingListPage() {
     fetchData();
   }, []);
 
-  const handleServiceNameChange = (value, isEditMode = false) => {
-    if (value.length > 255) {
-      toast.error("Service name cannot exceed 255 characters!");
-      return;
+  // Real-time sync: pick up bookings created/updated/deleted from another
+  // tab (e.g. Admin CRM and Client Portal open side by side) without a manual refresh.
+  useEffect(() => {
+    const handleStorageSync = (e) => {
+      if (
+        e.key === 'payment_sync_timestamp' ||
+        e.key === 'booking_sync_timestamp' ||
+        !e.key
+      ) {
+        fetchData();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageSync);
+
+    const interval = setInterval(() => {
+      const syncStamp = localStorage.getItem('payment_sync_timestamp');
+      if (syncStamp && syncStamp !== window._lastBookingSyncStamp) {
+        window._lastBookingSyncStamp = syncStamp;
+        fetchData();
+      }
+    }, 1000);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageSync);
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Deep link carrying a preselected date/time — either a "Book Now" link
+  // from a waitlist-availability email, or "Select" on the dedicated
+  // Available Slots page. Preselect it and open the create form right away.
+  useEffect(() => {
+    const date = searchParams.get('date');
+    const startTime = searchParams.get('start_time');
+    const endTime = searchParams.get('end_time');
+    if (date && startTime && endTime) {
+      setFormData((prev) => ({ ...prev, booking_date: date, start_time: startTime, end_time: endTime }));
+      setBookingViaSlotLink(true);
+      setShowModal(true);
+      setSearchParams({}, { replace: true });
     }
-    if (isEditMode) {
-      setSelectedBooking({...selectedBooking, service_name: value});
-    } else {
-      setFormData({...formData, service_name: value});
-    }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleCreateBooking = async (e) => {
     e.preventDefault();
-    if (formData.service_name.length > 255) {
-      toast.error("Ensure this field has no more than 255 characters.");
+    if (!formData.service) {
+      toast.error("Select a service to book.");
+      return;
+    }
+    if (isClientPortal && !myClient) {
+      toast.error("Your account isn't ready yet, please try again in a moment.");
       return;
     }
     try {
       const payload = {
-        ...formData,
-        client: parseInt(formData.client, 10),
+        service: parseInt(formData.service, 10),
+        booking_date: formData.booking_date,
+        notes: formData.notes,
+        // Clients can only ever book for themselves; ignore whatever the form holds.
+        client: isClientPortal ? myClient.id : parseInt(formData.client, 10),
         start_time: formData.start_time.length === 5 ? `${formData.start_time}:00` : formData.start_time,
         end_time: formData.end_time.length === 5 ? `${formData.end_time}:00` : formData.end_time,
+        // Note: price/rate/payment_status are never sent — the backend always
+        // calculates and validates them from the selected Service.
       };
 
-      await bookingService.createBooking(payload);
+      const created = await bookingService.createBooking(payload);
       setShowModal(false);
       setFormData({
         client: '',
-        service_name: '',
+        service: '',
         booking_date: '',
         start_time: '10:00',
         end_time: '11:00',
-        price: '',
-        payment_status: 'PENDING',
         notes: '',
       });
-      toast.success("Booking created successfully!");
-      
-      // Trigger cross-module sync flag for payments tab
+      toast.success(bookingViaSlotLink ? "Slot booked successfully!" : "Booking created successfully!");
+      setBookingViaSlotLink(false);
+      if (created?.email_sent === true) {
+        toast.success("Confirmation email sent to the client.");
+      } else if (created?.email_sent === false) {
+        toast.error("Booking created, but the confirmation email could not be sent.");
+      }
+
       localStorage.setItem('payment_sync_timestamp', Date.now().toString());
-      
       fetchData();
     } catch (err) {
-      const errorData = err.response?.data;
-      if (errorData?.service_name) {
-        toast.error(errorData.service_name[0]);
-      } else {
-        toast.error("Failed to create booking.");
-      }
-      console.error("Booking Creation Error:", errorData || err);
+      console.error("Booking Creation Error:", err.response?.data || err);
+      notifyApiError(err, "Failed to create booking.");
     }
   };
 
   const handleUpdateBooking = async (e) => {
     e.preventDefault();
-    if (selectedBooking.service_name?.length > 255) {
-      toast.error("Ensure this field has no more than 255 characters.");
-      return;
-    }
     try {
       const bookingId = selectedBooking.id || selectedBooking.pk;
       if (!bookingId) {
@@ -176,30 +267,42 @@ export default function BookingListPage() {
       const formattedEndTime = selectedBooking.end_time?.length === 5 ? `${selectedBooking.end_time}:00` : selectedBooking.end_time;
 
       const payload = {
-        service_name: selectedBooking.service_name,
         booking_date: selectedBooking.booking_date,
         start_time: formattedStartTime,
         end_time: formattedEndTime,
         status: selectedBooking.status,
-        payment_status: selectedBooking.payment_status,
-        price: selectedBooking.price !== '' ? parseFloat(selectedBooking.price) : null,
         notes: selectedBooking.notes || '',
+        // Only include `service` if the dropdown was actually touched — the
+        // backend takes a fresh rate snapshot whenever `service` is present
+        // in the payload, and otherwise keeps the original locked-in rate
+        // for this booking even if the Service's live rate has since changed.
+        ...(serviceTouched ? { service: selectedBooking.service ? parseInt(selectedBooking.service, 10) : null } : {}),
+        // price/rate_snapshot/payment_status are never sent — backend-owned.
       };
 
-      await bookingService.updateBooking(bookingId, payload);
+      const updated = await bookingService.updateBooking(bookingId, payload);
 
       toast.success("Booking updated successfully!");
+      if (updated?.client_notification_sent === true) {
+        toast.success("Confirmation email sent to the client.");
+      } else if (updated?.client_notification_sent === false) {
+        toast.error("Booking updated, but the confirmation email could not be sent.");
+      }
+      if (updated?.waitlist_notified_count > 0) {
+        toast.success(`Notification email sent to ${updated.waitlist_notified_count} waiting client(s).`);
+      }
       setIsEditing(false);
+      setServiceTouched(false);
       setSelectedBooking(null);
+      setShowEditSlots(false);
+      localStorage.setItem('payment_sync_timestamp', Date.now().toString());
       fetchData();
     } catch (err) {
-      const errorData = err.response?.data;
-      if (errorData?.service_name) {
-        toast.error(errorData.service_name[0]);
-      } else {
-        toast.error("Failed to update booking.");
+      console.error("Update Error:", err.response?.data || err);
+      notifyApiError(err, "Failed to update booking.");
+      if (selectedBooking?.booking_date) {
+        setShowEditSlots(true);
       }
-      console.error("Update Error:", errorData || err);
     }
   };
 
@@ -213,18 +316,16 @@ export default function BookingListPage() {
     try {
       await bookingService.deleteBooking(bookingId);
       toast.success("Booking deleted successfully!");
-      
-      // Update local state instantly without waiting for refetch
+
       setBookings(prevBookings => prevBookings.filter(b => (b.id || b.pk) !== bookingId));
       setSelectedBooking(null);
-      
-      // Signal cross-module payment sync timestamp
+
       localStorage.setItem('payment_sync_timestamp', Date.now().toString());
-      
+
       fetchData();
     } catch (err) {
-      toast.error("Failed to delete booking from server.");
       console.error("Delete Error:", err.response?.data || err);
+      notifyApiError(err, "Failed to delete booking.");
     }
   };
 
@@ -234,7 +335,20 @@ export default function BookingListPage() {
     const query = searchQuery.toLowerCase();
 
     const matchesSearch = clientName.includes(query) || serviceName.includes(query);
-    const matchesDate = filterDate ? booking.booking_date === filterDate : true;
+    
+    // Normalize and compare booking_date cleanly to include end dates and boundary filters accurately
+    let matchesDate = true;
+    if (filterDate) {
+      const bookingDateStr = booking.booking_date || booking.date;
+      if (bookingDateStr) {
+        // Compare ISO strings or standard date format segments (YYYY-MM-DD)
+        const normalizedBookingDate = bookingDateStr.substring(0, 10);
+        const normalizedFilterDate = filterDate.substring(0, 10);
+        matchesDate = normalizedBookingDate === normalizedFilterDate;
+      } else {
+        matchesDate = false;
+      }
+    }
 
     return matchesSearch && matchesDate;
   });
@@ -304,8 +418,8 @@ export default function BookingListPage() {
             </tr>
           </thead>
           <tbody>
-            {filteredBookings.length > 0 ? filteredBookings.map((booking) => (
-              <tr key={booking.id || booking.pk}>
+            {filteredBookings.length > 0 ? filteredBookings.map((booking, index) => (
+              <tr key={booking.id || booking.pk || index}>
                 <td style={{ padding: '16px', fontWeight: '700', color: '#1E2A3A' }}>
                   {booking.client_full_name || booking.client_name || booking.client?.full_name || `Client #${booking.client}`}
                 </td>
@@ -342,111 +456,125 @@ export default function BookingListPage() {
             <h2 style={{ marginBottom: '16px', color: '#1E2A3A' }}>Create New Booking</h2>
             <form onSubmit={handleCreateBooking} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
-                <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Select Client *</label>
-                <select 
-                  required
-                  value={formData.client}
-                  onChange={(e) => setFormData({...formData, client: e.target.value})}
-                  style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
-                >
-                  <option value="">-- Select a Client --</option>
-                  {clients.map(c => (
-                    <option key={c.id || c.pk} value={c.id || c.pk}>{c.full_name || c.name} ({c.email})</option>
-                  ))}
-                </select>
+                <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
+                  {isClientPortal ? 'Booking For' : 'Select Client *'}
+                </label>
+                {isClientPortal ? (
+                  <input
+                    type="text"
+                    readOnly
+                    disabled
+                    value={myClient ? `${myClient.full_name} (${myClient.email})` : 'Loading your account...'}
+                    style={{ width: '100%', background: '#E3E8F0', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#6B7A90', outline: 'none', cursor: 'not-allowed' }}
+                  />
+                ) : (
+                  <select
+                    required
+                    value={formData.client}
+                    onChange={(e) => setFormData({...formData, client: e.target.value})}
+                    style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
+                  >
+                    <option value="">-- Select a Client --</option>
+                    {clients.map(c => (
+                      <option key={c.id || c.pk} value={c.id || c.pk}>{c.full_name || c.name} ({c.email})</option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div>
-                <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Service Name * (Max 255 chars)</label>
-                <input 
-                  type="text" 
-                  required 
-                  maxLength={255}
-                  placeholder="e.g. Consultation / Therapy Session"
-                  value={formData.service_name} 
-                  onChange={(e) => handleServiceNameChange(e.target.value, false)} 
+                <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Service *</label>
+                <select
+                  required
+                  value={formData.service}
+                  onChange={(e) => setFormData({...formData, service: e.target.value})}
                   style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Date *</label>
-                  <input 
-                    type="date" 
-                    required 
-                    value={formData.booking_date} 
-                    onChange={(e) => setFormData({...formData, booking_date: e.target.value})} 
-                    style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Price ($) *</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    required 
-                    placeholder="0.00"
-                    value={formData.price} 
-                    onChange={(e) => setFormData({...formData, price: e.target.value})} 
-                    style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Payment Status *</label>
-                  <select 
-                    value={formData.payment_status}
-                    onChange={(e) => setFormData({...formData, payment_status: e.target.value})}
-                    style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
-                  >
-                    <option value="PENDING">Pending</option>
-                    <option value="PAID">Paid</option>
-                    <option value="REFUNDED">Refunded</option>
-                  </select>
-                </div>
+                >
+                  <option value="">-- Select a Service --</option>
+                  {services.map(s => (
+                    <option key={s.id} value={s.id}>{s.name} (${s.hourly_rate}/hr)</option>
+                  ))}
+                </select>
+                {(() => {
+                  const selected = services.find((s) => String(s.id) === String(formData.service));
+                  return selected?.description ? (
+                    <p style={{ fontSize: '11px', color: '#6B7A90', margin: '6px 0 0' }}>{selected.description}</p>
+                  ) : null;
+                })()}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Start Time *</label>
-                  <input 
-                    type="time" 
-                    required 
-                    value={formData.start_time} 
-                    onChange={(e) => setFormData({...formData, start_time: e.target.value})} 
+                  <input
+                    type="time"
+                    required
+                    value={formData.start_time}
+                    onChange={(e) => setFormData({...formData, start_time: e.target.value})}
                     style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
                   />
                 </div>
                 <div>
                   <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>End Time *</label>
-                  <input 
-                    type="time" 
-                    required 
-                    value={formData.end_time} 
-                    onChange={(e) => setFormData({...formData, end_time: e.target.value})} 
+                  <input
+                    type="time"
+                    required
+                    value={formData.end_time}
+                    onChange={(e) => setFormData({...formData, end_time: e.target.value})}
                     style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
                   />
                 </div>
               </div>
 
+              <div>
+                <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Date *</label>
+                <input
+                  type="date"
+                  required
+                  value={formData.booking_date}
+                  onChange={(e) => setFormData({...formData, booking_date: e.target.value})}
+                  style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '12px', padding: '10px', fontSize: '14px', color: '#1E2A3A', outline: 'none' }}
+                />
+              </div>
+
+              {/* Read-only preview — the backend always recalculates and validates the real total on save. */}
+              {(() => {
+                const preview = estimatePrice(formData.service, formData.start_time, formData.end_time);
+                return preview ? (
+                  <div style={{ background: '#E3E8F0', borderRadius: '12px', padding: '12px 14px', fontSize: '13px', color: '#1E2A3A' }}>
+                    <strong>Duration:</strong> {preview.durationHours.toFixed(2)} hrs &nbsp;·&nbsp;
+                    <strong>Rate:</strong> ${preview.rate.toFixed(2)}/hr &nbsp;·&nbsp;
+                    <strong>Estimated Total:</strong> ${preview.total.toFixed(2)}
+                  </div>
+                ) : null;
+              })()}
+
               <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '12px' }}>
-                <button 
-                  type="button" 
-                  onClick={() => setShowModal(false)} 
+                <button
+                  type="button"
+                  onClick={() => { setShowModal(false); setBookingViaSlotLink(false); }}
                   className="neu-btn"
                   style={{ background: '#EEF2F9', color: '#6B7A90', border: 'none', cursor: 'pointer' }}
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className="neu-btn neu-btn-primary"
                   style={{ border: 'none', cursor: 'pointer' }}
                 >
                   Save Booking
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const params = formData.booking_date ? `?date=${formData.booking_date}` : '';
+                    navigate(`${slotsPagePath}${params}`);
+                  }}
+                  className="neu-btn"
+                  style={{ background: '#EEF2F9', color: '#3E7BFA', border: 'none', cursor: 'pointer', fontWeight: 600 }}
+                >
+                  Available Slots
                 </button>
               </div>
             </form>
@@ -475,35 +603,48 @@ export default function BookingListPage() {
                 <p><strong>Notes:</strong> {selectedBooking.notes || 'None'}</p>
 
                 <div style={{ display: 'flex', gap: '10px', marginTop: '16px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                  <button onClick={() => setIsEditing(true)} className="neu-btn neu-btn-primary" style={{ border: 'none', cursor: 'pointer' }}>Edit / Change Status</button>
-                  <button 
-                    onClick={() => handleDeleteBooking(selectedBooking)} 
+                  <button onClick={() => { setIsEditing(true); setServiceTouched(false); }} className="neu-btn neu-btn-primary" style={{ border: 'none', cursor: 'pointer' }}>Edit / Change Status</button>
+                  <button
+                    onClick={() => handleDeleteBooking(selectedBooking)}
                     style={{ background: '#FDE8E8', color: '#9B1C1C', border: 'none', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: '600' }}
                   >
                     Delete
                   </button>
-                  <button onClick={() => setSelectedBooking(null)} className="neu-btn" style={{ background: '#EEF2F9', border: 'none', cursor: 'pointer' }}>Close</button>
+                  <button onClick={() => { setSelectedBooking(null); setShowEditSlots(false); }} className="neu-btn" style={{ background: '#EEF2F9', border: 'none', cursor: 'pointer' }}>Close</button>
                 </div>
               </div>
             ) : (
               // EDIT / STATUS CHANGE FORM MODE
               <form onSubmit={handleUpdateBooking} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 <div>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Service Name (Max 255 chars)</label>
-                  <input 
-                    type="text" 
-                    maxLength={255}
-                    value={selectedBooking.service_name || ''} 
-                    onChange={(e) => handleServiceNameChange(e.target.value, true)}
+                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Service</label>
+                  <select
+                    value={selectedBooking.service || ''}
+                    onChange={(e) => { setSelectedBooking({...selectedBooking, service: e.target.value}); setServiceTouched(true); }}
                     style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '8px', padding: '8px', outline: 'none' }}
-                  />
+                  >
+                    <option value="">-- Select a Service --</option>
+                    {services.map(s => (
+                      <option key={s.id} value={s.id}>{s.name} (${s.hourly_rate}/hr)</option>
+                    ))}
+                  </select>
+                  {(() => {
+                    const selected = services.find((s) => String(s.id) === String(selectedBooking.service));
+                    if (selected?.description) {
+                      return <p style={{ fontSize: '11px', color: '#6B7A90', margin: '4px 0 0' }}>{selected.description}</p>;
+                    }
+                    if (!serviceTouched && selectedBooking.service_name) {
+                      return <p style={{ fontSize: '11px', color: '#6B7A90', margin: '4px 0 0' }}>{selectedBooking.service_name}</p>;
+                    }
+                    return null;
+                  })()}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                   <div>
                     <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Booking Status</label>
-                    <select 
-                      value={selectedBooking.status || 'PENDING'} 
+                    <select
+                      value={selectedBooking.status || 'PENDING'}
                       onChange={(e) => setSelectedBooking({...selectedBooking, status: e.target.value})}
                       style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '8px', padding: '8px', outline: 'none' }}
                     >
@@ -516,26 +657,49 @@ export default function BookingListPage() {
 
                   <div>
                     <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Payment Status</label>
-                    <select 
-                      value={selectedBooking.payment_status || 'PENDING'} 
-                      onChange={(e) => setSelectedBooking({...selectedBooking, payment_status: e.target.value})}
-                      style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '8px', padding: '8px', outline: 'none' }}
-                    >
-                      <option value="PENDING">Pending</option>
-                      <option value="PAID">Paid</option>
-                      <option value="REFUNDED">Refunded</option>
-                    </select>
+                    <div style={{ padding: '8px 0' }}>
+                      <PaymentStatusBadge status={selectedBooking.payment_status} />
+                    </div>
+                    <p style={{ fontSize: '11px', color: '#6B7A90', margin: '4px 0 0' }}>Manage via the Payments page.</p>
                   </div>
                 </div>
 
                 <div>
                   <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Date</label>
-                  <input 
-                    type="date" 
-                    value={selectedBooking.booking_date || ''} 
+                  <input
+                    type="date"
+                    value={selectedBooking.booking_date || ''}
                     onChange={(e) => setSelectedBooking({...selectedBooking, booking_date: e.target.value})}
                     style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '8px', padding: '8px', outline: 'none' }}
                   />
+                </div>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!selectedBooking.booking_date) {
+                        toast.error('Pick a date first to see available slots.');
+                        return;
+                      }
+                      setShowEditSlots((v) => !v);
+                    }}
+                    style={{ background: 'transparent', border: 'none', color: '#3E7BFA', fontSize: '13px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                  >
+                    {showEditSlots ? 'Hide Available Slots' : 'View Available Slots (for rescheduling)'}
+                  </button>
+                  {showEditSlots && (
+                    <div style={{ marginTop: '8px' }}>
+                      <AvailableSlotsPanel
+                        date={selectedBooking.booking_date}
+                        isStaff={!isClientPortal}
+                        onSelectSlot={(start, end) => {
+                          setSelectedBooking((prev) => ({ ...prev, start_time: start.substring(0, 5), end_time: end.substring(0, 5) }));
+                          setShowEditSlots(false);
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
@@ -559,19 +723,34 @@ export default function BookingListPage() {
                   </div>
                 </div>
 
-                <div>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#6B7A90', display: 'block', marginBottom: '4px' }}>Price ($)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={selectedBooking.price || ''} 
-                    onChange={(e) => setSelectedBooking({...selectedBooking, price: e.target.value})}
-                    style={{ width: '100%', background: '#EEF2F9', border: 'none', borderRadius: '8px', padding: '8px', outline: 'none' }}
-                  />
+                {/* Price is backend-calculated and read-only — never trust a manually entered value. */}
+                <div style={{ background: '#E3E8F0', borderRadius: '8px', padding: '10px 12px', fontSize: '13px', color: '#1E2A3A' }}>
+                  {(() => {
+                    const preview = estimatePrice(
+                      selectedBooking.service,
+                      formatTimeForInput(selectedBooking.start_time),
+                      formatTimeForInput(selectedBooking.end_time)
+                    );
+                    if (serviceTouched && preview) {
+                      return (
+                        <>
+                          <strong>Duration:</strong> {preview.durationHours.toFixed(2)} hrs &nbsp;·&nbsp;
+                          <strong>Rate:</strong> ${preview.rate.toFixed(2)}/hr &nbsp;·&nbsp;
+                          <strong>New Estimated Total:</strong> ${preview.total.toFixed(2)}
+                        </>
+                      );
+                    }
+                    return (
+                      <>
+                        <strong>Current Price:</strong> ${selectedBooking.price}
+                        {selectedBooking.rate_snapshot && ` (locked at $${selectedBooking.rate_snapshot}/hr)`}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
-                  <button type="button" onClick={() => setIsEditing(false)} className="neu-btn" style={{ background: '#EEF2F9', border: 'none', cursor: 'pointer' }}>Cancel</button>
+                  <button type="button" onClick={() => { setIsEditing(false); setServiceTouched(false); setShowEditSlots(false); }} className="neu-btn" style={{ background: '#EEF2F9', border: 'none', cursor: 'pointer' }}>Cancel</button>
                   <button type="submit" className="neu-btn neu-btn-primary" style={{ border: 'none', cursor: 'pointer' }}>Save Changes</button>
                 </div>
               </form>

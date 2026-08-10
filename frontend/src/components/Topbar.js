@@ -1,14 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 
-export default function Topbar({ user, onLogout, onEditProfile }) {
+export default function Topbar({ user, onLogout, onEditProfile, notifications = [], unreadCount = 0, onMarkNotificationRead }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const dropdownRef = useRef(null);
+  const notifRef = useRef(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setDropdownOpen(false);
+      }
+      if (notifRef.current && !notifRef.current.contains(event.target)) {
+        setNotifOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -20,6 +25,43 @@ export default function Topbar({ user, onLogout, onEditProfile }) {
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-gray-700">Welcome back, <span className="text-blue-600">{user?.full_name || 'User'}</span> 👋</span>
       </div>
+
+      <div className="flex items-center gap-4">
+        {/* Notification Bell */}
+        <div className="relative" ref={notifRef}>
+          <button
+            onClick={() => setNotifOpen(!notifOpen)}
+            className="relative flex items-center justify-center w-10 h-10 rounded-full hover:bg-gray-100 transition"
+            title="Notifications"
+          >
+            <span className="text-xl">🔔</span>
+            {unreadCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {notifOpen && (
+            <div className="absolute right-0 mt-3 w-80 bg-white rounded-2xl shadow-xl border border-gray-100 py-2 z-50 max-h-96 overflow-y-auto">
+              <div className="px-4 py-2 border-b border-gray-100 font-bold text-gray-900 text-sm">Notifications</div>
+              {notifications.length === 0 ? (
+                <p className="px-4 py-6 text-center text-sm text-gray-400">No notifications yet.</p>
+              ) : (
+                notifications.slice(0, 15).map((n) => (
+                  <button
+                    key={n.id}
+                    onClick={() => onMarkNotificationRead?.(n.id)}
+                    className={`w-full text-left px-4 py-2.5 text-sm border-b border-gray-50 hover:bg-blue-50 transition ${n.is_read ? 'opacity-60' : ''}`}
+                  >
+                    <p className="font-semibold text-gray-800">{n.title}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{n.message}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
 
       {/* User Profile Dropdown Container */}
       <div className="relative" ref={dropdownRef}>
@@ -68,6 +110,7 @@ export default function Topbar({ user, onLogout, onEditProfile }) {
             </div>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

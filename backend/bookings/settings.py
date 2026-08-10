@@ -10,6 +10,7 @@ DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host]
 
 INSTALLED_APPS = [
+    "daphne",
     "django_filters",
     "django.contrib.admin",
     "django.contrib.auth",
@@ -109,13 +110,21 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
-    "DEFAULT_THROTTLE_RATES": {"google_auth": "10/min"},
+    "DEFAULT_THROTTLE_RATES": {"google_auth": "10/min", "otp_request": "5/min", "otp_verify": "10/min"},
 }
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "unique-snowflake",
         "TIMEOUT": 300,  # Cache expiry time in seconds (e.g., 5 minutes)
+    }
+}
+# In-process channel layer for real-time notification delivery (notifications app).
+# Sufficient for a single-process dev/deployment; swap for channels_redis in a
+# multi-process production deployment without changing any calling code.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
     }
 }
 SIMPLE_JWT = {

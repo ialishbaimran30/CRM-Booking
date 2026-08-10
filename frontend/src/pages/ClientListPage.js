@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { clientService } from '../api/clientService';
 import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
+import { notifyApiError } from '../utils/apiError';
 
 export default function ClientListPage() {
   const [clients, setClients] = useState([]);
@@ -106,47 +107,16 @@ export default function ClientListPage() {
     try {
       if (isEditing) {
         await clientService.updateClient(currentClientId, formData);
-        alert("Client updated successfully!");
+        toast.success("Client updated successfully!");
       } else {
         await clientService.createClient(formData);
-        alert("Client created successfully!");
+        toast.success("Client created successfully!");
       }
       setShowModal(false);
       fetchClients(); // Refreshes list instantly
     } catch (err) {
       console.error("Full Error Response:", err?.response?.data);
-      const responseData = err?.response?.data;
-      
-      if (responseData) {
-        // Check specifically for duplicate email validation error
-        const emailErrors = responseData.email;
-        if (emailErrors) {
-          const emailErrorText = Array.isArray(emailErrors) ? emailErrors[0] : emailErrors;
-          if (
-            typeof emailErrorText === 'string' && 
-            (emailErrorText.toLowerCase().includes('already exists') || emailErrorText.toLowerCase().includes('unique'))
-          ) {
-            alert("A client with this email already exists. Please use a different email address.");
-          } else {
-            alert(emailErrorText);
-          }
-        } else {
-          // Handle other field-specific or general validation errors
-          const firstKey = Object.keys(responseData)[0];
-          const firstError = firstKey ? responseData[firstKey] : null;
-          const errorMsg = Array.isArray(firstError) ? firstError[0] : firstError;
-
-          if (typeof errorMsg === 'string') {
-            alert(errorMsg);
-          } else if (typeof responseData === 'string') {
-            alert(responseData);
-          } else {
-            alert(isEditing ? "Failed to update client. Check inputs." : "Failed to create client. Check inputs.");
-          }
-        }
-      } else {
-        alert(isEditing ? "Failed to update client." : "Failed to create client. Check inputs.");
-      }
+      notifyApiError(err, isEditing ? "Failed to update client." : "Failed to create client. Check inputs.");
     }
   };
 
@@ -158,8 +128,8 @@ export default function ClientListPage() {
       toast.success("Client deleted successfully!");
       fetchClients(); // Refreshes list instantly
     } catch (err) {
-      toast.error("Failed to delete client.");
       console.error(err);
+      notifyApiError(err, "Failed to delete client.");
     }
   };
 

@@ -34,7 +34,7 @@ class BillingService:
         return invoice
 
     @staticmethod
-    def mark_invoice_paid(invoice, *, payment_method, discount_amount=None, coupon_code=""):
+    def mark_invoice_paid(invoice, *, payment_method, discount_amount=None, coupon_code="", marked_by=None):
         """Applies an optional discount, then records one full payment (no partial payments)."""
         if invoice.status == Invoice.PaymentStatus.PAID:
             raise ValueError("This invoice is already paid.")
@@ -54,6 +54,7 @@ class BillingService:
             amount=invoice.total_amount,
             payment_method=payment_method,
             status=Payment.PaymentStatus.PAID,
+            marked_by=marked_by,
         )
         invoice.status = Invoice.PaymentStatus.PAID
         invoice.save(update_fields=["status"])
@@ -70,7 +71,33 @@ class BillingService:
         return payment
 
     @staticmethod
-    def refund_invoice(invoice, *, reason=""):
+    def mark_invoice_unpaid(invoice):
+        """Reverses a paid invoice back to unpaid (distinct from a refund — no refund reason recorded)."""
+        if invoice.status == Invoice.PaymentStatus.UNPAID:
+            raise ValueError("This invoice is already unpaid.")
+        if invoice.status == Invoice.PaymentStatus.REFUNDED:
+            raise ValueError("A refunded invoice cannot be marked as unpaid.")
+
+        latest_payment = invoice.payments.filter(status=Payment.PaymentStatus.PAID).order_by("-id").first()
+        if latest_payment:
+            latest_payment.delete()
+
+        invoice.status = Invoice.PaymentStatus.UNPAID
+        invoice.save(update_fields=["status"])
+
+        # keep the booking's payment_status in sync
+        booking = invoice.booking
+        booking.payment_status = booking.PaymentStatus.PENDING
+        booking.save(update_fields=["payment_status"])
+
+        user_id = booking.created_by_id
+        _bump_version(f"invoice_version_{user_id}")
+        _bump_version(f"payment_version_{user_id}")
+        _bump_version("booking_version_global")
+        return invoice
+
+    @staticmethod
+    def refund_invoice(invoice, *, reason="", marked_by=None):
         if invoice.status != Invoice.PaymentStatus.PAID:
             raise ValueError("Only a paid invoice can be refunded.")
 
@@ -78,7 +105,8 @@ class BillingService:
         if latest_payment:
             latest_payment.status = Payment.PaymentStatus.REFUNDED
             latest_payment.refund_reason = reason
-            latest_payment.save(update_fields=["status", "refund_reason"])
+            latest_payment.marked_by = marked_by
+            latest_payment.save(update_fields=["status", "refund_reason", "marked_by"])
 
         invoice.status = Invoice.PaymentStatus.REFUNDED
         invoice.save(update_fields=["status"])

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { clientService } from '../api/clientService';
 import { bookingService } from '../api/bookingService';
+import { notifyApiError } from '../utils/apiError';
 
 const StatTile = ({ title, value }) => (
   <div className="neu-card" style={{ textAlign: 'center', padding: '20px' }}>
@@ -48,6 +49,7 @@ export default function DashboardPage() {
         });
       } catch (err) {
         console.error("Error fetching dashboard stats:", err);
+        notifyApiError(err, "Failed to load dashboard data.");
       } finally {
         setLoading(false);
       }

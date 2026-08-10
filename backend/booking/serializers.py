@@ -1,13 +1,45 @@
+from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
+
 from rest_framework import serializers
-from .models import Booking, Waitlist
+from accounts.permissions import is_staff_member
+from .models import Booking, Service, Waitlist
 from clients.models import Client
 from django.utils import timezone
+
+
+def _duration_hours(start_time, end_time):
+    """Exact decimal hours between two `time` values (end assumed after start)."""
+    delta = datetime.combine(date.min, end_time) - datetime.combine(date.min, start_time)
+    return Decimal(delta.seconds) / Decimal(3600)
+
+
+def _calculate_total(duration_hours, hourly_rate):
+    return (duration_hours * hourly_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+class ServiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Service
+        fields = ["id", "name", "hourly_rate", "description", "is_active"]
 
 
 class BookingSerializer(serializers.ModelSerializer):
     """Serializer for the Booking model."""
 
     client_full_name = serializers.CharField(source="client.full_name", read_only=True)
+    # Only active services may be newly selected; a booking already linked to
+    # a since-deactivated service still displays/reads fine (write-only restriction).
+    service = serializers.PrimaryKeyRelatedField(queryset=Service.objects.filter(is_active=True), required=False, allow_null=True)
+    # Backend-derived from the selected service when one is provided (see
+    # _apply_backend_pricing) — only required as free text on the legacy
+    # no-Service manual path.
+    service_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    # Backend-calculated when a service is selected; only Staff may submit
+    # this directly, and only on the legacy no-Service manual path.
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    # Read-only, informational — backend-computed from start/end time.
+    duration_hours = serializers.SerializerMethodField()
     # Set by the post_save signal in booking/signals.py; None until a create actually runs it.
     email_sent = serializers.SerializerMethodField()
     # Set in BookingViewSet.perform_update when a cancel/reschedule frees a
@@ -21,7 +53,19 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = "__all__"
-        read_only_fields = ("created_by", "created_at", "updated_at", "client_full_name")
+        # `rate_snapshot` is always backend-set (see _apply_backend_pricing).
+        # `price` stays writable at the field level (Staff need it for the
+        # legacy no-Service manual-price path) but `_apply_backend_pricing`
+        # is the sole authority that decides whose submitted value survives —
+        # it always overwrites `price` when a Service is involved, and strips
+        # it entirely for non-Staff on the no-Service fallback. Never trust
+        # `data['price']` as-received. `payment_status` may only ever change
+        # via the Invoice pay/unpaid/refund actions in the payments app,
+        # never through this generic booking endpoint.
+        read_only_fields = (
+            "created_by", "created_at", "updated_at", "client_full_name",
+            "rate_snapshot", "payment_status",
+        )
         # Disable DRF's auto-generated UniqueTogetherValidator (from the
         # conditional UniqueConstraint on Meta.constraints) — it fires before
         # our own validate() below and produces a generic "must make a unique
@@ -39,12 +83,17 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_client_notification_sent(self, obj):
         return getattr(obj, "_client_notification_sent", None)
 
+    def get_duration_hours(self, obj):
+        if not (obj.start_time and obj.end_time):
+            return None
+        return float(_duration_hours(obj.start_time, obj.end_time))
+
     def validate(self, data):
         request = self.context.get("request")
         user = request.user if request else None
 
         # Enforce client restrictions on backend
-        if user and not user.is_staff and not user.is_superuser:
+        if user and not is_staff_member(user):
             own_client = Client.get_or_create_for_user(user)
 
             # If a client attempts to pass a different client ID, override or throw error
@@ -57,10 +106,10 @@ class BookingSerializer(serializers.ModelSerializer):
         end_time = data.get('end_time')
         booking_date = data.get('booking_date') or (self.instance.booking_date if self.instance else None)
         client = data.get('client') or (self.instance.client if self.instance else None)
-        
+
         if start_time and end_time and start_time >= end_time:
             raise serializers.ValidationError({"end_time": "End time must be after start time."})
-            
+
         if booking_date and start_time and end_time:
             # Slots are a shared, globally exclusive resource (one booking per
             # date+time regardless of which client holds it) — this is what
@@ -78,14 +127,58 @@ class BookingSerializer(serializers.ModelSerializer):
                 if client and conflict.client_id == getattr(client, "id", None):
                     raise serializers.ValidationError({"non_field_errors": ["You already have a booking at this time."]})
                 raise serializers.ValidationError({"non_field_errors": ["This slot has already been booked by another client."]})
+
+        self._apply_backend_pricing(data, user)
         return data
+
+    def _apply_backend_pricing(self, data, user):
+        """Backend-controlled pricing: never trust a client-supplied price.
+        A Service drives the calculation (duration * hourly rate, snapshotted);
+        only Staff may fall back to the legacy manual-price path when no
+        Service is selected at all (e.g. an ad-hoc booking)."""
+        is_staff = bool(user and is_staff_member(user))
+        service_provided = 'service' in data
+        service = data.get('service') if service_provided else (self.instance.service if self.instance else None)
+
+        if service is None:
+            if not is_staff:
+                if not self.instance:
+                    raise serializers.ValidationError({"service": "Select a service to book."})
+                # A Client editing their own legacy (pre-Service) booking —
+                # never trust a client-supplied price; leave the stored value untouched.
+                data.pop('price', None)
+                return
+            # Legacy/manual path (Staff only, no catalog Service): trust
+            # whatever price they submitted (create), or leave it untouched (update).
+            if not self.instance and 'price' not in data:
+                raise serializers.ValidationError({"price": "Select a service, or enter a price manually."})
+            return
+
+        start_time = data.get('start_time', self.instance.start_time if self.instance else None)
+        end_time = data.get('end_time', self.instance.end_time if self.instance else None)
+        if not (start_time and end_time):
+            return
+
+        duration_hours = _duration_hours(start_time, end_time)
+
+        if service_provided:
+            # A (new) service was explicitly selected — take a fresh rate snapshot.
+            rate = service.hourly_rate
+        else:
+            # Times changed but the service didn't — keep the original locked-in rate
+            # so a later Service.hourly_rate edit never retroactively changes this booking.
+            rate = self.instance.rate_snapshot if self.instance and self.instance.rate_snapshot is not None else service.hourly_rate
+
+        data['rate_snapshot'] = rate
+        data['price'] = _calculate_total(duration_hours, rate)
+        data['service_name'] = service.name
 
     def create(self, validated_data):
         request = self.context.get("request")
         if request and request.user:
             validated_data["created_by"] = request.user
             # Double-check safety guard on create
-            if not request.user.is_staff and not request.user.is_superuser:
+            if not is_staff_member(request.user):
                 validated_data["client"] = Client.get_or_create_for_user(request.user)
 
         booking = super().create(validated_data)
@@ -137,7 +230,7 @@ class WaitlistSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = request.user if request else None
 
-        if user and not user.is_staff and not user.is_superuser:
+        if user and not is_staff_member(user):
             # Clients can only ever join the waitlist for themselves.
             data["client"] = Client.get_or_create_for_user(user)
         elif "client" not in data:

@@ -5,6 +5,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
 from rest_framework.response import Response
+from accounts.permissions import IsStaffMember
 from .models import Client
 from .serializers import ClientSerializer, ClientDetailSerializer
 from booking.models import Booking
@@ -15,9 +16,12 @@ class ClientViewSet(viewsets.ModelViewSet):
     """
     A ViewSet for viewing, creating, updating, and deleting clients.
     Provides searching, filtering, and sorting capabilities without pagination.
+
+    This is the CRM "Clients" module — Staff (Admin or Booking Manager) only.
+    A Client's own profile is reached instead via the `me` action below.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
     pagination_class = None  # Removes pagination to display all records on a single view
     queryset = Client.objects.all()
     filter_backends = [
@@ -29,21 +33,23 @@ class ClientViewSet(viewsets.ModelViewSet):
     search_fields = ["full_name", "email", "phone_number"]
     ordering_fields = ["full_name", "created_at", "status"]
 
+    def get_permissions(self):
+        # Any authenticated user (Staff or Client) may look up their own record.
+        if self.action == "me":
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     def get_serializer_class(self):
         if self.action == "retrieve":
             return ClientDetailSerializer
         return ClientSerializer
 
-    def get_queryset(self): 
-        user = self.request.user
-
-        if self.action in ("update", "partial_update", "destroy"):
-            queryset = Client.objects.all()
-        else:
-            client_ids = Booking.objects.filter(created_by=user).values_list(
-                "client_id", flat=True
-            )
-            queryset = Client.objects.filter(Q(id__in=client_ids) | Q(bookings__isnull=True))
+    def get_queryset(self):
+        # Only Staff ever reaches this queryset (Clients are blocked by
+        # IsStaffMember above and use the `me` action instead), so every
+        # Staff member — Admin or Booking Manager — sees every client,
+        # keeping the CRM in sync regardless of who created what.
+        queryset = Client.objects.all()
 
         if self.action == "retrieve" or self.action == "destroy":
                 queryset = queryset.prefetch_related("bookings").annotate(

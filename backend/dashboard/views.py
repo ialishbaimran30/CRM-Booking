@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Count, Sum, Q
+from accounts.permissions import IsAdmin
 from clients.models import Client
 from booking.models import Booking
 from django.utils import timezone
@@ -14,7 +15,8 @@ class DashboardSummaryView(APIView):
     """
     Provides a summary of key metrics for the logged-in user's dashboard.
     """
-    permission_classes = [IsAuthenticated]
+    # The Dashboard module is Admin-only — Booking Managers land on Clients instead.
+    permission_classes = [IsAuthenticated, IsAdmin]
     @method_decorator(cache_page(60 * 5))
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request, *args, **kwargs):

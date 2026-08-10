@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { NeumorphicCard } from '../components/common/NeumorphicCard';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import toast from 'react-hot-toast';
+import { extractErrorMessage } from '../utils/apiError';
 
 export default function ReportsView() {
   const [loading, setLoading] = useState(true);
@@ -35,11 +36,17 @@ export default function ReportsView() {
           chart_data: data.chart_data || (Array.isArray(data) ? data : [])
         });
       } else {
-        toast.error("Failed to load reports from server.");
+        let message = "Failed to load reports from server.";
+        try {
+          message = extractErrorMessage(await res.json(), message);
+        } catch (_) {
+          // response body wasn't JSON — fall back to the generic message
+        }
+        toast.error(message);
       }
     } catch (err) {
       console.error("Error fetching reports:", err);
-      toast.error("An error occurred while fetching reports.");
+      toast.error("Network error while fetching reports.");
     } finally {
       if (showLoader) setLoading(false);
     }
