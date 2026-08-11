@@ -99,6 +99,17 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Google OAuth 2.0 Web client ID. ID token ka audience isi ID ke against verify hota hai.
 GOOGLE_OAUTH_CLIENT_ID = "646130636057-pvm4nt85umvm0gl2orld8ku7nbmlcert.apps.googleusercontent.com"
 
+# Google Calendar sync — server-side OAuth (authorization code + refresh
+# token) for the business account, reusing the same GCP project/OAuth client
+# as Google Sign-In above but with a client secret + redirect URI added.
+# Backend-only: never sent to the frontend.
+GOOGLE_CALENDAR_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_CLIENT_ID", GOOGLE_OAUTH_CLIENT_ID)
+GOOGLE_CALENDAR_CLIENT_SECRET = os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET", "")
+GOOGLE_CALENDAR_REDIRECT_URI = os.getenv(
+    "GOOGLE_CALENDAR_REDIRECT_URI", "http://localhost:8000/admin-tools/google-calendar/callback/"
+)
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
