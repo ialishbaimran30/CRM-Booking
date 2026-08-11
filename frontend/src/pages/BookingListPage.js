@@ -245,6 +245,11 @@ export default function BookingListPage() {
       } else if (created?.email_sent === false) {
         toast.error("Booking created, but the confirmation email could not be sent.");
       }
+      if (created?.calendar_sync_status === 'SYNCED') {
+        toast.success("Booking confirmed and added to Google Calendar. Client invitation sent.");
+      } else if (created?.calendar_sync_status === 'FAILED') {
+        toast("Booking confirmed. Calendar synchronization is pending.");
+      }
 
       localStorage.setItem('payment_sync_timestamp', Date.now().toString());
       fetchData();
@@ -290,6 +295,11 @@ export default function BookingListPage() {
       }
       if (updated?.waitlist_notified_count > 0) {
         toast.success(`Notification email sent to ${updated.waitlist_notified_count} waiting client(s).`);
+      }
+      if (updated?.calendar_sync_status === 'SYNCED') {
+        toast.success("Google Calendar updated.");
+      } else if (updated?.calendar_sync_status === 'FAILED') {
+        toast("Booking updated. Calendar synchronization is pending.");
       }
       setIsEditing(false);
       setServiceTouched(false);

@@ -41,9 +41,26 @@ def _provision_client_if_unstaffed(user):
     """Backend-driven role determination (single source of truth): a freshly
     authenticated user with no Staff Role is a Client — ensure their Client
     profile exists immediately, so the frontend can route them straight into
-    the Client Portal without ever asking them to pick a role."""
-    if get_user_role(user) is None:
-        Client.get_or_create_for_user(user)
+    the Client Portal without ever asking them to pick a role.
+
+    A Django superuser is a distinct, backend-only concept (it only controls
+    /admin/ access) and is never itself read as a React role — but someone
+    who already holds that trust and signs into the CRM with no
+    TeamRoleAssignment yet is an operator waiting to claim the (usually
+    already-provisioned-but-unassigned) Admin seat, never a Client. Claiming
+    it here — instead of falling through to Client — is what actually fixes
+    a Django superuser being resolved as Client; TeamRoleAssignment remains
+    the sole source of truth the frontend reads.
+    """
+    if get_user_role(user) is not None:
+        return
+    if user.is_superuser:
+        admin_seat = TeamRoleAssignment.objects.filter(role_name="Admin", assigned_user__isnull=True).first()
+        if admin_seat:
+            admin_seat.assigned_user = user
+            admin_seat.save(update_fields=["assigned_user"])
+            return
+    Client.get_or_create_for_user(user)
 
 logger = logging.getLogger(__name__)
 

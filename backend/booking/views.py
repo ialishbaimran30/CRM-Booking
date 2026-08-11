@@ -18,6 +18,7 @@ from .emails import (
     send_booking_rescheduled_email,
     send_booking_updated_email,
 )
+from .google_calendar import GoogleCalendarService
 from django.core.cache import cache
 from django.utils import timezone
 import logging
@@ -75,8 +76,15 @@ class BookingViewSet(viewsets.ModelViewSet):
         if is_staff_member(user):
             return Booking.objects.all()
 
-        # Strict Client Isolation: clients can only access bookings they created themselves.
-        return Booking.objects.filter(created_by=user)
+        # Strict Client Isolation: a booking belongs to a client by its
+        # `client` association, not by who created it — Admin/Booking
+        # Manager routinely create bookings on a client's behalf, and those
+        # must still show up in that client's own My Bookings. Matching by
+        # `created_by` here would only ever surface bookings the client
+        # created themselves. Matches the same email-based lookup already
+        # used for Waitlist (WaitlistViewSet.get_queryset, below) and for
+        # resolving "my own client record" (Client.get_or_create_for_user).
+        return Booking.objects.filter(client__email__iexact=user.email)
 
     @action(detail=False, methods=["get"], url_path="available-slots")
     def available_slots(self, request):
@@ -214,6 +222,25 @@ class BookingViewSet(viewsets.ModelViewSet):
         except Exception:
             logger.exception("Failed to send in-app booking-created notifications for booking %s", booking.id)
 
+        self._sync_calendar_on_create(booking)
+
+    def _sync_calendar_on_create(self, booking):
+        """Best-effort Calendar sync — a failure here must never fail the
+        booking, which has already been committed above."""
+        try:
+            ok, event_id, error = GoogleCalendarService.create_event(booking)
+            if ok:
+                booking.google_event_id = event_id
+                booking.calendar_sync_status = Booking.CalendarSyncStatus.SYNCED
+                booking.calendar_sync_error = ""
+            else:
+                booking.calendar_sync_status = Booking.CalendarSyncStatus.FAILED
+                booking.calendar_sync_error = error or ""
+                logger.error("Google Calendar sync failed for booking %s: %s", booking.id, error)
+            booking.save(update_fields=["google_event_id", "calendar_sync_status", "calendar_sync_error"])
+        except Exception:
+            logger.exception("Unexpected error syncing booking %s to Google Calendar", booking.id)
+
     def perform_update(self, serializer):
         old_instance = serializer.instance
         old_date = old_instance.booking_date
@@ -258,6 +285,13 @@ class BookingViewSet(viewsets.ModelViewSet):
             booking._waitlist_notified_count = notify_waitlist_for_freed_slot(old_date, old_start, old_end)
             _notify_waitlist_slot_available_in_app(old_date, old_start, old_end)
 
+        other_change = (
+            old_service_name != booking.service_name
+            or old_price != booking.price
+            or old_payment_status != booking.payment_status
+            or old_status != booking.status
+        )
+
         # Notify the booking's own client — exactly one email per update,
         # matching whichever change is most significant to them. The in-app
         # + WebSocket notification (Admin/Booking Manager/Client, per
@@ -274,18 +308,42 @@ class BookingViewSet(viewsets.ModelViewSet):
                     previous_value=f"{old_date.strftime('%d %b')}, {old_start.strftime('%I:%M %p')}",
                     new_value=f"{booking.booking_date.strftime('%d %b')}, {booking.start_time.strftime('%I:%M %p')}",
                 )
-            else:
-                other_change = (
-                    old_service_name != booking.service_name
-                    or old_price != booking.price
-                    or old_payment_status != booking.payment_status
-                    or old_status != booking.status
-                )
-                if other_change:
-                    booking._client_notification_sent = send_booking_updated_email(booking)
-                    CommunicationService.notify_booking_event(booking, actor=self.request.user, action="updated")
+            elif other_change:
+                booking._client_notification_sent = send_booking_updated_email(booking)
+                CommunicationService.notify_booking_event(booking, actor=self.request.user, action="updated")
         except Exception:
             logger.exception("Failed to send in-app booking-update notifications for booking %s", booking.id)
+
+        self._sync_calendar_on_update(booking, just_cancelled=just_cancelled, changed=rescheduled or other_change)
+
+    def _sync_calendar_on_update(self, booking, *, just_cancelled, changed):
+        """Best-effort Calendar sync mirroring the cancel/reschedule/update
+        classification already computed above — never fails the update."""
+        try:
+            if just_cancelled:
+                ok, _event_id, error = GoogleCalendarService.delete_event(booking)
+                if ok:
+                    booking.google_event_id = None
+                    booking.calendar_sync_status = Booking.CalendarSyncStatus.CANCELLED
+                    booking.calendar_sync_error = ""
+                else:
+                    booking.calendar_sync_status = Booking.CalendarSyncStatus.FAILED
+                    booking.calendar_sync_error = error or ""
+                    logger.error("Google Calendar delete failed for booking %s: %s", booking.id, error)
+                booking.save(update_fields=["google_event_id", "calendar_sync_status", "calendar_sync_error"])
+            elif changed:
+                ok, event_id, error = GoogleCalendarService.update_event(booking)
+                if ok:
+                    booking.google_event_id = event_id
+                    booking.calendar_sync_status = Booking.CalendarSyncStatus.SYNCED
+                    booking.calendar_sync_error = ""
+                else:
+                    booking.calendar_sync_status = Booking.CalendarSyncStatus.FAILED
+                    booking.calendar_sync_error = error or ""
+                    logger.error("Google Calendar sync failed for booking %s: %s", booking.id, error)
+                booking.save(update_fields=["google_event_id", "calendar_sync_status", "calendar_sync_error"])
+        except Exception:
+            logger.exception("Unexpected error syncing booking %s to Google Calendar", booking.id)
 
     def update(self, request, *args, **kwargs):
         try:
@@ -323,6 +381,14 @@ class BookingViewSet(viewsets.ModelViewSet):
                 CommunicationService.notify_booking_event(instance, actor=self.request.user, action="cancelled")
             except Exception:
                 logger.exception("Failed to send in-app booking-deleted notifications for booking %s", instance.id)
+
+        # Hard delete: remove the Calendar event first, before the CRM row
+        # (which holds google_event_id) is gone.
+        if instance.google_event_id:
+            try:
+                GoogleCalendarService.delete_event(instance)
+            except Exception:
+                logger.exception("Failed to delete Google Calendar event for booking %s", instance.id)
 
         with transaction.atomic():
             # Clean up related payment/invoice records explicitly to prevent orphans

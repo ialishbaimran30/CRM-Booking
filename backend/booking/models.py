@@ -37,6 +37,12 @@ class Booking(models.Model):
         PAID = "PAID", "Paid"
         REFUNDED = "REFUNDED", "Refunded"
 
+    class CalendarSyncStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        SYNCED = "SYNCED", "Synced"
+        FAILED = "FAILED", "Failed"
+        CANCELLED = "CANCELLED", "Cancelled"
+
     client = models.ForeignKey(Client, on_delete=models.CASCADE, related_name="bookings")
     service = models.ForeignKey(
         Service, on_delete=models.SET_NULL, null=True, blank=True, related_name="bookings"
@@ -66,6 +72,16 @@ class Booking(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Google Calendar sync — google_event_id is the sole source of truth for
+    # "does this booking already have a calendar event", used to decide
+    # create vs. update and to prevent duplicate events on retries.
+    google_event_id = models.CharField(max_length=255, null=True, blank=True)
+    calendar_sync_status = models.CharField(
+        max_length=20, choices=CalendarSyncStatus.choices, default=CalendarSyncStatus.PENDING
+    )
+    # Technical detail for logs/admin only — never surfaced to the frontend.
+    calendar_sync_error = models.TextField(blank=True)
 
     class Meta:
         constraints = [
@@ -105,3 +121,20 @@ class Waitlist(models.Model):
 
     def __str__(self):
         return f"{self.client.full_name} waiting for {self.booking_date} {self.start_time}"
+
+
+class GoogleCalendarCredential(models.Model):
+    """The business account's Google Calendar OAuth authorization. Expected
+    to be a single row — the one shared calendar every booking syncs to."""
+
+    calendar_id = models.CharField(max_length=255, default="primary")
+    refresh_token_encrypted = models.TextField()
+    connected_email = models.EmailField(max_length=255, blank=True)
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    connected_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Google Calendar: {self.connected_email or self.calendar_id}"

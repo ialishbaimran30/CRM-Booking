@@ -65,6 +65,7 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "created_by", "created_at", "updated_at", "client_full_name",
             "rate_snapshot", "payment_status",
+            "google_event_id", "calendar_sync_status", "calendar_sync_error",
         )
         # Disable DRF's auto-generated UniqueTogetherValidator (from the
         # conditional UniqueConstraint on Meta.constraints) — it fires before
