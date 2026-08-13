@@ -72,7 +72,19 @@ export default function App() {
   // /api/notifications/notifications/ endpoint backs both the bell dropdown
   // and (for Admin) the Notification History page.
   const [notifications, setNotifications] = useState([]);
-  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  // "Clear" only hides notifications from the bell/dropdown — it never
+  // touches is_read or the database, so Activity History (which fetches its
+  // own copy independently) is completely unaffected. Persisted locally so
+  // cleared items stay cleared across a refresh.
+  const [clearedNotificationIds, setClearedNotificationIds] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('cleared_notification_ids') || '[]');
+    } catch (e) {
+      return [];
+    }
+  });
+  const visibleNotifications = notifications.filter((n) => !clearedNotificationIds.includes(n.id));
+  const unreadCount = visibleNotifications.filter((n) => !n.is_read).length;
 
   useEffect(() => {
     if (!user?.id) return;
@@ -100,6 +112,24 @@ export default function App() {
     } catch (err) {
       console.error('Failed to mark notification as read:', err);
     }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    try {
+      await notificationService.markAllAsRead();
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    } catch (err) {
+      console.error('Failed to mark all notifications as read:', err);
+    }
+  };
+
+  const handleClearNotifications = () => {
+    const idsToClear = notifications.map((n) => n.id);
+    setClearedNotificationIds((prev) => {
+      const merged = Array.from(new Set([...prev, ...idsToClear]));
+      localStorage.setItem('cleared_notification_ids', JSON.stringify(merged));
+      return merged;
+    });
   };
 
   const handleLogout = () => {
@@ -136,9 +166,11 @@ export default function App() {
               user={user}
               onLogout={handleLogout}
               onEditProfile={() => setShowEditModal(true)}
-              notifications={notifications}
+              notifications={visibleNotifications}
               unreadCount={unreadCount}
               onMarkNotificationRead={handleMarkNotificationRead}
+              onMarkAllRead={handleMarkAllNotificationsRead}
+              onClearNotifications={handleClearNotifications}
             />
             <div className="flex-1 overflow-y-auto p-8">
               <Routes>

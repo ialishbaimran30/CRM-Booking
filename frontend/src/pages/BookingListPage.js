@@ -63,6 +63,9 @@ export default function BookingListPage() {
   const [serviceTouched, setServiceTouched] = useState(false);
   const [showEditSlots, setShowEditSlots] = useState(false);
   const [bookingViaSlotLink, setBookingViaSlotLink] = useState(false);
+  // Prevents duplicate submits and drives the "Saving..." loading toast while
+  // create/update is in flight (background email/calendar sync makes this take a few seconds).
+  const [isSavingBooking, setIsSavingBooking] = useState(false);
 
   const [formData, setFormData] = useState({
     client: '',
@@ -207,6 +210,7 @@ export default function BookingListPage() {
 
   const handleCreateBooking = async (e) => {
     e.preventDefault();
+    if (isSavingBooking) return;
     if (!formData.service) {
       toast.error("Select a service to book.");
       return;
@@ -215,6 +219,8 @@ export default function BookingListPage() {
       toast.error("Your account isn't ready yet, please try again in a moment.");
       return;
     }
+    setIsSavingBooking(true);
+    const savingToastId = toast.loading("Saving booking, this may take a few seconds...");
     try {
       const payload = {
         service: parseInt(formData.service, 10),
@@ -238,7 +244,7 @@ export default function BookingListPage() {
         end_time: '11:00',
         notes: '',
       });
-      toast.success(bookingViaSlotLink ? "Slot booked successfully!" : "Booking created successfully!");
+      toast.success(bookingViaSlotLink ? "Slot booked successfully!" : "Booking created successfully!", { id: savingToastId });
       setBookingViaSlotLink(false);
       if (created?.email_sent === true) {
         toast.success("Confirmation email sent to the client.");
@@ -255,19 +261,24 @@ export default function BookingListPage() {
       fetchData();
     } catch (err) {
       console.error("Booking Creation Error:", err.response?.data || err);
+      toast.dismiss(savingToastId);
       notifyApiError(err, "Failed to create booking.");
+    } finally {
+      setIsSavingBooking(false);
     }
   };
 
   const handleUpdateBooking = async (e) => {
     e.preventDefault();
+    if (isSavingBooking) return;
+    const bookingId = selectedBooking.id || selectedBooking.pk;
+    if (!bookingId) {
+      toast.error("Error: Booking ID not found!");
+      return;
+    }
+    setIsSavingBooking(true);
+    const savingToastId = toast.loading("Saving booking, this may take a few seconds...");
     try {
-      const bookingId = selectedBooking.id || selectedBooking.pk;
-      if (!bookingId) {
-        toast.error("Error: Booking ID not found!");
-        return;
-      }
-
       const formattedStartTime = selectedBooking.start_time?.length === 5 ? `${selectedBooking.start_time}:00` : selectedBooking.start_time;
       const formattedEndTime = selectedBooking.end_time?.length === 5 ? `${selectedBooking.end_time}:00` : selectedBooking.end_time;
 
@@ -287,7 +298,7 @@ export default function BookingListPage() {
 
       const updated = await bookingService.updateBooking(bookingId, payload);
 
-      toast.success("Booking updated successfully!");
+      toast.success("Booking updated successfully!", { id: savingToastId });
       if (updated?.client_notification_sent === true) {
         toast.success("Confirmation email sent to the client.");
       } else if (updated?.client_notification_sent === false) {
@@ -309,10 +320,13 @@ export default function BookingListPage() {
       fetchData();
     } catch (err) {
       console.error("Update Error:", err.response?.data || err);
+      toast.dismiss(savingToastId);
       notifyApiError(err, "Failed to update booking.");
       if (selectedBooking?.booking_date) {
         setShowEditSlots(true);
       }
+    } finally {
+      setIsSavingBooking(false);
     }
   };
 
@@ -570,10 +584,11 @@ export default function BookingListPage() {
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingBooking}
                   className="neu-btn neu-btn-primary"
-                  style={{ border: 'none', cursor: 'pointer' }}
+                  style={{ border: 'none', cursor: isSavingBooking ? 'not-allowed' : 'pointer', opacity: isSavingBooking ? 0.7 : 1 }}
                 >
-                  Save Booking
+                  {isSavingBooking ? 'Saving...' : 'Save Booking'}
                 </button>
                 <button
                   type="button"
@@ -703,6 +718,7 @@ export default function BookingListPage() {
                       <AvailableSlotsPanel
                         date={selectedBooking.booking_date}
                         isStaff={!isClientPortal}
+                        clientId={selectedBooking.client}
                         onSelectSlot={(start, end) => {
                           setSelectedBooking((prev) => ({ ...prev, start_time: start.substring(0, 5), end_time: end.substring(0, 5) }));
                           setShowEditSlots(false);
@@ -761,7 +777,7 @@ export default function BookingListPage() {
 
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '12px' }}>
                   <button type="button" onClick={() => { setIsEditing(false); setServiceTouched(false); setShowEditSlots(false); }} className="neu-btn" style={{ background: '#EEF2F9', border: 'none', cursor: 'pointer' }}>Cancel</button>
-                  <button type="submit" className="neu-btn neu-btn-primary" style={{ border: 'none', cursor: 'pointer' }}>Save Changes</button>
+                  <button type="submit" disabled={isSavingBooking} className="neu-btn neu-btn-primary" style={{ border: 'none', cursor: isSavingBooking ? 'not-allowed' : 'pointer', opacity: isSavingBooking ? 0.7 : 1 }}>{isSavingBooking ? 'Saving...' : 'Save Changes'}</button>
                 </div>
               </form>
             )}

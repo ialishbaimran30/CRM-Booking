@@ -1,10 +1,26 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 
-export default function Topbar({ user, onLogout, onEditProfile, notifications = [], unreadCount = 0, onMarkNotificationRead }) {
+export default function Topbar({
+  user, onLogout, onEditProfile, notifications = [], unreadCount = 0,
+  onMarkNotificationRead, onMarkAllRead, onClearNotifications,
+}) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const dropdownRef = useRef(null);
   const notifRef = useRef(null);
+  const navigate = useNavigate();
+  const isAdmin = user?.role === 'Admin';
+
+  const handleNotificationClick = (n) => {
+    onMarkNotificationRead?.(n.id);
+    // Activity History is Admin-only, so only Admins get sent there —
+    // everyone else keeps the existing mark-as-read-only behavior.
+    if (isAdmin && n.booking_id) {
+      setNotifOpen(false);
+      navigate(`/notification-history?highlight=${n.id}`);
+    }
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -44,14 +60,33 @@ export default function Topbar({ user, onLogout, onEditProfile, notifications = 
 
           {notifOpen && (
             <div className="absolute right-0 mt-3 w-80 bg-white rounded-2xl shadow-xl border border-gray-100 py-2 z-50 max-h-96 overflow-y-auto">
-              <div className="px-4 py-2 border-b border-gray-100 font-bold text-gray-900 text-sm">Notifications</div>
+              <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between gap-2">
+                <span className="font-bold text-gray-900 text-sm">Notifications</span>
+                {notifications.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => onMarkAllRead?.()}
+                      className="text-xs font-semibold text-blue-600 hover:text-blue-700"
+                    >
+                      Mark All as Read
+                    </button>
+                    <span className="text-gray-300">|</span>
+                    <button
+                      onClick={() => onClearNotifications?.()}
+                      className="text-xs font-semibold text-gray-500 hover:text-gray-700"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+              </div>
               {notifications.length === 0 ? (
                 <p className="px-4 py-6 text-center text-sm text-gray-400">No notifications yet.</p>
               ) : (
                 notifications.slice(0, 15).map((n) => (
                   <button
                     key={n.id}
-                    onClick={() => onMarkNotificationRead?.(n.id)}
+                    onClick={() => handleNotificationClick(n)}
                     className={`w-full text-left px-4 py-2.5 text-sm border-b border-gray-50 hover:bg-blue-50 transition ${n.is_read ? 'opacity-60' : ''}`}
                   >
                     <p className="font-semibold text-gray-800">{n.title}</p>

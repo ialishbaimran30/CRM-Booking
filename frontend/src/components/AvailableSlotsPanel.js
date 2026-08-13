@@ -13,10 +13,12 @@ const formatLabel = (timeStr) => {
 
 /**
  * Shows the fixed business-hours slot grid for a date: available vs booked,
- * lets the caller pick an open slot, and (for clients) offers "Notify me"
- * for a booked one. Shared by both the Admin and Client Portal booking forms.
+ * lets the caller pick an open slot, and offers "Notify me" for a booked
+ * one — for clients on their own behalf, or for staff on behalf of the
+ * client whose booking they're rescheduling (pass `clientId` for that case).
+ * Shared by both the Admin and Client Portal booking forms.
  */
-export default function AvailableSlotsPanel({ date, isStaff, onSelectSlot, fullHeight = false }) {
+export default function AvailableSlotsPanel({ date, isStaff, clientId, onSelectSlot, fullHeight = false }) {
   const [slots, setSlots] = useState([]);
   const [loading, setLoading] = useState(false);
   const [joiningKey, setJoiningKey] = useState(null);
@@ -70,6 +72,10 @@ export default function AvailableSlotsPanel({ date, isStaff, onSelectSlot, fullH
         booking_date: date,
         start_time: slot.start_time,
         end_time: slot.end_time,
+        // Staff have no "own client" to auto-resolve server-side, so when
+        // acting on behalf of the client being rescheduled, the target
+        // client must be supplied explicitly.
+        ...(isStaff && clientId ? { client: clientId } : {}),
       });
       toast.success('Added to waitlist successfully! We\'ll email you if this slot opens up.');
       // Broadcast the same sync signal bookings/payments use so the
@@ -134,7 +140,7 @@ export default function AvailableSlotsPanel({ date, isStaff, onSelectSlot, fullH
                   >
                     Select
                   </button>
-                ) : !isStaff ? (
+                ) : (!isStaff || clientId) ? (
                   slot.on_waitlist ? (
                     <span style={{ color: '#6B7A90', fontSize: '12px', fontWeight: 600 }}>✓ On Waitlist</span>
                   ) : (

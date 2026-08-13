@@ -110,7 +110,7 @@ export default function Sidebar({ isAdmin }) {
                   : 'text-[#6B7A90] hover:text-[#1E2A3A] hover:bg-[#F4F7FC]'
               }`}
             >
-              <span>🔔</span> Notification History
+              <span>📋</span> Activity History
             </Link>
           )}
         </nav>

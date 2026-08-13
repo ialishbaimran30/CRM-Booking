@@ -12,4 +12,8 @@ export const notificationService = {
     const response = await api.post(`/notifications/notifications/${id}/mark_as_read/`);
     return response.data;
   },
+  markAllAsRead: async () => {
+    const response = await api.post('/notifications/notifications/mark_all_as_read/');
+    return response.data;
+  },
 };

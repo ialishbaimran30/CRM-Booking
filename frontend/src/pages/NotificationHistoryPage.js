@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { notificationService } from '../api/notificationService';
 import { notifyApiError } from '../utils/apiError';
@@ -31,6 +32,11 @@ const formatDateTime = (iso) => {
 export default function NotificationHistoryPage() {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Deep link from the notification bell (Topbar.js): ?highlight=<notification id>
+  // scrolls to and briefly highlights that specific entry.
+  const [searchParams] = useSearchParams();
+  const highlightId = searchParams.get('highlight');
+  const highlightRef = useRef(null);
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -47,6 +53,12 @@ export default function NotificationHistoryPage() {
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
+
+  useEffect(() => {
+    if (!loading && highlightId && highlightRef.current) {
+      highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [loading, highlightId]);
 
   // Booking-related notifications are the ones with structured actor/booking
   // context — that's what this history is meant to show.
@@ -78,15 +90,18 @@ export default function NotificationHistoryPage() {
         ) : (
           bookingEvents.map((n) => {
             const meta = ACTION_LABELS[n.notification_type] || ACTION_LABELS.GENERAL;
+            const isHighlighted = highlightId && String(n.id) === String(highlightId);
             return (
               <div
                 key={n.id}
+                ref={isHighlighted ? highlightRef : null}
                 className="neu-card"
                 onClick={() => !n.is_read && handleMarkRead(n.id)}
                 style={{
                   padding: '16px 20px',
                   cursor: n.is_read ? 'default' : 'pointer',
                   borderLeft: n.is_read ? '4px solid transparent' : '4px solid #3E7BFA',
+                  boxShadow: isHighlighted ? '0 0 0 2px #3E7BFA' : undefined,
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px' }}>

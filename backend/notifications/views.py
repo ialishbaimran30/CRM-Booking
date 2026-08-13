@@ -33,3 +33,9 @@ class NotificationViewSet(viewsets.ModelViewSet):
         notification.is_read = True
         notification.save()
         return Response({"status": "notification marked as read"}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="mark_all_as_read")
+    def mark_all_as_read(self, request):
+        """Marks every one of the current user's own notifications as read."""
+        self.get_queryset().filter(is_read=False).update(is_read=True)
+        return Response({"status": "all notifications marked as read"}, status=status.HTTP_200_OK)

@@ -26,6 +26,33 @@ class CommunicationService:
         return notification
 
     @staticmethod
+    def _upsert_cancelled_notification(user, title, message, notification_type,
+                                        actor, booking, previous_value, new_value):
+        """Cancellation updates the booking's existing Activity History entry
+        for this recipient in place, instead of appending a new one — unlike
+        every other lifecycle action (created/updated/rescheduled), which
+        always adds a fresh row and is unaffected by this method."""
+        from django.utils import timezone
+
+        existing = Notification.objects.filter(recipient=user, booking=booking).order_by("-created_at").first()
+        if existing is None:
+            return CommunicationService.send_in_app_notification(
+                user, title, message, notification_type,
+                actor=actor, booking=booking, previous_value=previous_value, new_value=new_value,
+            )
+        existing.title = title
+        existing.message = message
+        existing.notification_type = notification_type
+        existing.actor = actor
+        existing.previous_value = previous_value
+        existing.new_value = new_value
+        existing.is_read = False
+        existing.created_at = timezone.now()
+        existing.save()
+        CommunicationService._broadcast(existing)
+        return existing
+
+    @staticmethod
     def _broadcast(notification):
         """Deliver the just-created notification over the recipient's
         WebSocket group in real time. This is purely a delivery mechanism on
@@ -172,11 +199,16 @@ class CommunicationService:
 
         created = []
         for user in recipients.values():
-            created.append(cls.send_in_app_notification(
-                user, title, message, notif_type,
-                actor=actor, booking=booking,
-                previous_value=previous_value, new_value=new_value,
-            ))
+            if action == "cancelled":
+                created.append(cls._upsert_cancelled_notification(
+                    user, title, message, notif_type, actor, booking, previous_value, new_value,
+                ))
+            else:
+                created.append(cls.send_in_app_notification(
+                    user, title, message, notif_type,
+                    actor=actor, booking=booking,
+                    previous_value=previous_value, new_value=new_value,
+                ))
         return created
 
     @classmethod

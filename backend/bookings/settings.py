@@ -5,6 +5,20 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load backend/.env into the process environment for local development, so
+# values (e.g. GOOGLE_CALENDAR_CLIENT_SECRET) survive a server restart in a
+# fresh terminal instead of needing to be re-exported by hand each time.
+# Real environment variables (e.g. set by a deployment platform) always win —
+# setdefault() never overwrites a value that's already present.
+_env_file = BASE_DIR / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _key, _value = _line.split("=", 1)
+        os.environ.setdefault(_key.strip(), _value.strip())
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-this-before-production")
 DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host]

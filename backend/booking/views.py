@@ -300,7 +300,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         try:
             if just_cancelled:
                 booking._client_notification_sent = send_booking_cancelled_email(booking)
-                CommunicationService.notify_booking_event(booking, actor=self.request.user, action="cancelled")
+                CommunicationService.notify_booking_event(
+                    booking, actor=self.request.user, action="cancelled",
+                    previous_value=f"{old_date.strftime('%d %b')}, {old_start.strftime('%I:%M %p')}",
+                )
             elif rescheduled:
                 booking._client_notification_sent = send_booking_rescheduled_email(booking, old_date, old_start, old_end)
                 CommunicationService.notify_booking_event(
@@ -378,7 +381,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         if old_status in ACTIVE_STATUSES:
             send_booking_cancelled_email(instance, deleted=True)
             try:
-                CommunicationService.notify_booking_event(instance, actor=self.request.user, action="cancelled")
+                CommunicationService.notify_booking_event(
+                    instance, actor=self.request.user, action="cancelled",
+                    previous_value=f"{old_date.strftime('%d %b')}, {old_start.strftime('%I:%M %p')}",
+                )
             except Exception:
                 logger.exception("Failed to send in-app booking-deleted notifications for booking %s", instance.id)
 
