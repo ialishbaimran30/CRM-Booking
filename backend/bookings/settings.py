@@ -111,7 +111,11 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Google OAuth 2.0 Web client ID. ID token ka audience isi ID ke against verify hota hai.
-GOOGLE_OAUTH_CLIENT_ID = "646130636057-pvm4nt85umvm0gl2orld8ku7nbmlcert.apps.googleusercontent.com"
+# Not secret (client IDs are public), but sourced from env for consistency with
+# GOOGLE_CALENDAR_CLIENT_ID below.
+GOOGLE_OAUTH_CLIENT_ID = os.getenv(
+    "GOOGLE_OAUTH_CLIENT_ID", "646130636057-pvm4nt85umvm0gl2orld8ku7nbmlcert.apps.googleusercontent.com"
+)
 
 # Google Calendar sync — server-side OAuth (authorization code + refresh
 # token) for the business account, reusing the same GCP project/OAuth client
@@ -168,6 +172,6 @@ EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = "alishba.im13@gmail.com"
-EMAIL_HOST_PASSWORD = "ejhkgejahkhtkfgz"  # Gmail App Password, normal password nahi
-DEFAULT_FROM_EMAIL = "CRM & Booking <alishba.im13@gmail.com>"
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")  # Gmail App Password, normal password nahi
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"CRM & Booking <{EMAIL_HOST_USER}>")
