@@ -49,9 +49,12 @@ jobs:
           skip_app_build: true
           ###### Repository/Build Configurations - These values can be configured to match your app requirements. ######
           # For more information regarding Static Web App workflow configurations, please visit: https://aka.ms/swaworkflowconfig
-          app_location: "./frontend" # App source code path
+          # With skip_app_build: true, app_location must be the already-built output folder
+          # itself (not the source dir) — otherwise Oryx still treats it as an unbuilt app
+          # and runs its own npm install/npm run build regardless of skip_app_build.
+          app_location: "./frontend/build" # Pre-built app content path (built by the step above)
           api_location: "" # Api source code path - optional
-          output_location: "build" # Built app content directory - already built above, this just tells the action where to find it
+          output_location: "" # Not used when skip_app_build is true; app_location is already the output
           ###### End of Repository/Build Configurations ######
 
   close_pull_request_job:
