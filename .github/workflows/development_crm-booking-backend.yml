@@ -31,10 +31,10 @@ jobs:
       - name: Build and push container image to registry
         uses: docker/build-push-action@v3
         with:
-          context: .
+          context: ./backend
           push: true
           tags: crmbookingacr2026.azurecr.io/${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_CB958AE96D5B4C9088DA0CB980242F06 }}/crm-booking-backend:${{ github.sha }}
-          file: ./Dockerfile
+          file: ./backend/Dockerfile
 
   deploy:
     runs-on: ubuntu-latest
