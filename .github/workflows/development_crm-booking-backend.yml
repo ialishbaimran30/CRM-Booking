@@ -24,7 +24,7 @@ jobs:
       - name: Log in to container registry
         uses: docker/login-action@v2
         with:
-          registry: crmbookingacr2026.azurecr.io/
+          registry: crmbookingacr2026.azurecr.io
           username: ${{ secrets.AZUREAPPSERVICE_CONTAINERUSERNAME_CB958AE96D5B4C9088DA0CB980242F06 }}
           password: ${{ secrets.AZUREAPPSERVICE_CONTAINERPASSWORD_4FC2D1277BEF41FBBB0225314D2C5E8F }}
 
