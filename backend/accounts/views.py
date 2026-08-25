@@ -43,23 +43,16 @@ def _provision_client_if_unstaffed(user):
     profile exists immediately, so the frontend can route them straight into
     the Client Portal without ever asking them to pick a role.
 
-    A Django superuser is a distinct, backend-only concept (it only controls
-    /admin/ access) and is never itself read as a React role — but someone
-    who already holds that trust and signs into the CRM with no
-    TeamRoleAssignment yet is an operator waiting to claim the (usually
-    already-provisioned-but-unassigned) Admin seat, never a Client. Claiming
-    it here — instead of falling through to Client — is what actually fixes
-    a Django superuser being resolved as Client; TeamRoleAssignment remains
-    the sole source of truth the frontend reads.
+    Role assignment is never automatic on login, for anyone, superuser or
+    not — a Django superuser only controls /admin/ access and is a distinct,
+    backend-only concept from the CRM's Admin/Booking Manager/Client role.
+    The Admin seat must always be assigned explicitly (directly in the
+    database, or via the Team Management screen once someone already holds
+    it) — never auto-claimed by whoever happens to sign in first.
+    TeamRoleAssignment remains the sole source of truth the frontend reads.
     """
     if get_user_role(user) is not None:
         return
-    if user.is_superuser:
-        admin_seat = TeamRoleAssignment.objects.filter(role_name="Admin", assigned_user__isnull=True).first()
-        if admin_seat:
-            admin_seat.assigned_user = user
-            admin_seat.save(update_fields=["assigned_user"])
-            return
     Client.get_or_create_for_user(user)
 
 logger = logging.getLogger(__name__)
@@ -201,13 +194,12 @@ class TeamManagementViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsStaffMember, IsAdminOrReadOnly]
 
     def get_queryset(self):
-        # Bootstrap the single Admin seat only — Booking Manager is now a
-        # dynamic list the Admin builds explicitly (create/remove), not a
-        # fixed placeholder row.
-        admin_role, _ = TeamRoleAssignment.objects.get_or_create(role_name='Admin')
-        if not admin_role.assigned_user and self.request and self.request.user and self.request.user.is_authenticated:
-            admin_role.assigned_user = self.request.user
-            admin_role.save()
+        # Bootstrap the single Admin seat row only, so it always exists to be
+        # explicitly assigned later — Booking Manager is a dynamic list the
+        # Admin builds explicitly (create/remove), not a fixed placeholder
+        # row. Assignment itself is never automatic: whoever happens to load
+        # this endpoint first must never silently become Admin.
+        TeamRoleAssignment.objects.get_or_create(role_name='Admin')
         return super().get_queryset()
 
     @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated, IsAdmin])
