@@ -32,8 +32,8 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from clients.models import Client
-from core.alerting import alert_on_role_change
-from core.audit import log_security_event, record_audit_event
+from core.alerting import alert_on_login_failure, alert_on_role_change
+from core.audit import get_client_ip, log_security_event, record_audit_event
 from core.models import AuditLog
 from .models import TeamRoleAssignment
 from .permissions import IsAdmin, IsAdminOrReadOnly, IsStaffMember, get_user_role
@@ -192,6 +192,7 @@ class EmailOTPVerifyView(APIView):
             user, created = verify_email_otp(email, code)
         except OtpNotFoundError:
             log_security_event("otp_verify", request, outcome="failure", extra={"email": email, "reason": "not_found_or_expired"})
+            alert_on_login_failure(email, get_client_ip(request))
             return Response(
                 {"detail": "Code not found or expired. Please request a new one."},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -204,6 +205,7 @@ class EmailOTPVerifyView(APIView):
             )
         except OtpInvalidError as exc:
             log_security_event("otp_verify", request, outcome="failure", extra={"email": email, "reason": "incorrect_code"})
+            alert_on_login_failure(email, get_client_ip(request))
             return Response(
                 {"detail": "Incorrect code.", "attempts_remaining": exc.attempts_remaining},
                 status=status.HTTP_400_BAD_REQUEST,
