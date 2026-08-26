@@ -1,5 +1,6 @@
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
+from accounts.permissions import IsStaffMember
 from .models import Staff, Resource, BookingAssignment
 from .serializers import StaffSerializer, ResourceSerializer, BookingAssignmentSerializer
 from django.utils.decorators import method_decorator
@@ -12,7 +13,7 @@ from django.views.decorators.vary import vary_on_headers
 class StaffViewSet(viewsets.ModelViewSet):
     queryset = Staff.objects.all()
     serializer_class = StaffSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
 
     @method_decorator(cache_page(60 * 5))
     @method_decorator(vary_on_headers("Authorization"))
@@ -23,7 +24,7 @@ class StaffViewSet(viewsets.ModelViewSet):
 class ResourceViewSet(viewsets.ModelViewSet):
     queryset = Resource.objects.all()
     serializer_class = ResourceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
 
     @method_decorator(cache_page(60 * 5))
     @method_decorator(vary_on_headers("Authorization"))
@@ -34,7 +35,7 @@ class ResourceViewSet(viewsets.ModelViewSet):
 class BookingAssignmentViewSet(viewsets.ModelViewSet):
     queryset = BookingAssignment.objects.all()
     serializer_class = BookingAssignmentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsStaffMember]
 
     @method_decorator(cache_page(60 * 5))
     @method_decorator(vary_on_headers("Authorization"))

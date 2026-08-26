@@ -11,3 +11,4 @@ daphne>=4.0,<5.0
 gunicorn>=23.0,<24.0
 requests>=2.31,<3.0
 cryptography>=42,<50
+opencensus-ext-azure>=1.1,<2.0

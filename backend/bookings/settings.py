@@ -19,8 +19,17 @@ if _env_file.exists():
         _key, _value = _line.split("=", 1)
         os.environ.setdefault(_key.strip(), _value.strip())
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-this-before-production")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
+
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "insecure-dev-only-key-do-not-use-in-production"
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is not true."
+        )
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host]
 
 INSTALLED_APPS = [
@@ -140,8 +149,15 @@ REST_FRAMEWORK = {
 
     ],
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    "EXCEPTION_HANDLER": "core.exceptions.logging_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
-    "DEFAULT_THROTTLE_RATES": {"google_auth": "10/min", "otp_request": "5/min", "otp_verify": "10/min"},
+    "DEFAULT_THROTTLE_RATES": {
+        "google_auth": "10/min",
+        "otp_request": "5/min",
+        "otp_verify": "10/min",
+        "login": "5/min",
+        "token_refresh": "20/min",
+    },
 }
 CACHES = {
     "default": {
@@ -193,3 +209,73 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")  # Gmail App Password, normal password nahi
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"CRM & Booking <{EMAIL_HOST_USER}>")
+SERVER_EMAIL = DEFAULT_FROM_EMAIL  # From address Django uses for mail_admins (core/alerting.py, F-9)
+
+# Real, owned destination for security alerts (SecurityFeatures.md F-9) —
+# core/alerting.py routes rate-based and one-off security conditions here
+# via Django's own mail_admins. Comma-separated email addresses; empty by
+# default so alerting is a deliberate opt-in per deployment.
+SECURITY_ALERT_EMAILS = [addr.strip() for addr in os.getenv("SECURITY_ALERT_EMAILS", "").split(",") if addr.strip()]
+ADMINS = [(f"Security Alert Recipient {i + 1}", email) for i, email in enumerate(SECURITY_ALERT_EMAILS)]
+
+# Structured JSON logging to stdout (SecurityFeatures.md F-1). Correct for a
+# container on App Service, where stdout is what gets collected — a log file
+# on the container's own disk is lost on every restart. The `security`
+# logger carries authentication/authorization events (core/audit.py);
+# `django` carries framework/operational logs as before.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {"()": "core.logging.JSONFormatter"},
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+        "security": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
+
+# Off-box log shipping (SecurityFeatures.md F-9, ASVS 16.4.3) — a log that
+# only lives on the container is evidence an attacker (or an ordinary
+# restart) can erase. Only added when an Azure Monitor / Log Analytics
+# connection string is configured, so local dev and CI never need the
+# `opencensus-ext-azure` package installed or reachable — declaring the
+# handler class unconditionally would make Django try to import it on
+# every startup regardless of whether it's actually used.
+AZURE_LOG_ANALYTICS_CONNECTION_STRING = os.getenv("AZURE_LOG_ANALYTICS_CONNECTION_STRING", "")
+if AZURE_LOG_ANALYTICS_CONNECTION_STRING:
+    # opencensus-ext-azure's own self-telemetry ("statsbeat") makes a
+    # synchronous network call during handler construction — confirmed by
+    # hand to add ~9 extra seconds to every process boot (13s vs 4s) when
+    # left on. It's Microsoft's own SDK-usage diagnostics, not anything
+    # this app's monitoring depends on, so it's off by default. Must be set
+    # before the handler below is constructed by dictConfig.
+    os.environ.setdefault("APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL", "true")
+    LOGGING["handlers"]["azure"] = {
+        # core.logging.AzureLogHandler, not opencensus's own class directly
+        # — see that module for why (a confirmed crash-on-every-log bug in
+        # opencensus-ext-azure 1.1.15 that this wraps a fix around).
+        "class": "core.logging.AzureLogHandler",
+        "connection_string": AZURE_LOG_ANALYTICS_CONNECTION_STRING,
+        "formatter": "json",
+    }
+    LOGGING["loggers"]["security"]["handlers"].append("azure")
+    LOGGING["loggers"]["django"]["handlers"].append("azure")

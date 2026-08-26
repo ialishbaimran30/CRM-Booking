@@ -8,7 +8,12 @@ def get_user_role(user):
     None (no Staff Role — treated as a Client everywhere in the app)."""
     if not user or not user.is_authenticated:
         return None
-    assignment = TeamRoleAssignment.objects.filter(assigned_user=user).first()
+    assignment = (
+        TeamRoleAssignment.objects
+        .filter(assigned_user=user)
+        .order_by("role_name")  # 'Admin' sorts before 'Booking Manager' — highest privilege wins
+        .first()
+    )
     return assignment.role_name if assignment else None
 
 

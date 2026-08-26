@@ -7,6 +7,9 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from accounts.permissions import IsAdmin, IsStaffMember, is_admin
+from core.alerting import alert_on_invoice_void_or_refund
+from core.audit import record_audit_event
+from core.models import AuditLog
 from .models import Invoice, Payment
 from .pdf import render_invoice_pdf
 from .serializers import InvoiceSerializer, PaymentSerializer
@@ -67,14 +70,30 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         return response
 
     def perform_create(self, serializer):
-        serializer.save()
+        instance = serializer.save()
         _bump_version(f"invoice_version_{self.request.user.id}")
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.INVOICE_CREATED, target=instance,
+            changes={"total_amount": str(instance.total_amount), "status": instance.status},
+            request=self.request,
+        )
 
     def perform_update(self, serializer):
-        serializer.save()
+        instance = serializer.save()
         _bump_version(f"invoice_version_{self.request.user.id}")
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.INVOICE_UPDATED, target=instance,
+            changes={"total_amount": str(instance.total_amount), "status": instance.status},
+            request=self.request,
+        )
 
     def perform_destroy(self, instance):
+        changes = {"invoice_number": instance.invoice_number, "total_amount": str(instance.total_amount)}
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.INVOICE_DELETED, target=instance,
+            changes=changes, request=self.request,
+        )
+        alert_on_invoice_void_or_refund("voided", self.request.user.email, str(instance), changes)
         instance.delete()
         _bump_version(f"invoice_version_{self.request.user.id}")
         _bump_version(f"payment_version_{self.request.user.id}")
@@ -119,7 +138,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         invoice = self.get_object()
 
         try:
-            BillingService.mark_invoice_unpaid(invoice)
+            BillingService.mark_invoice_unpaid(invoice, marked_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
 

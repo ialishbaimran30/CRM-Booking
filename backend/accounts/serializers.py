@@ -1,9 +1,30 @@
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from core.alerting import alert_on_login_failure
+from core.audit import get_client_ip, log_security_event
 from .models import TeamRoleAssignment
 from .permissions import get_user_role
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 User = get_user_model()
+
+
+class LoggingTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """Logs every password-login attempt to the `security` logger
+    (SecurityFeatures.md F-1) without ever logging the password itself —
+    only the submitted identifier (username_field, e.g. email) is captured."""
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        identifier = attrs.get(self.username_field, "")
+        try:
+            data = super().validate(attrs)
+        except Exception:
+            log_security_event("login", request, outcome="failure", extra={"identifier": identifier})
+            alert_on_login_failure(identifier, get_client_ip(request))
+            raise
+        log_security_event("login", request, outcome="success", actor=self.user, extra={"identifier": identifier})
+        return data
 
 
 

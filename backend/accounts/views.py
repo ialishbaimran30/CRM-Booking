@@ -7,11 +7,13 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .serializers import (
     AuthenticatedUserSerializer,
     EmailOTPRequestSerializer,
     EmailOTPVerifySerializer,
     GoogleSignInSerializer,
+    LoggingTokenObtainPairSerializer,
 )
 from .services import (
     GoogleAccountLinkError,
@@ -30,6 +32,9 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from clients.models import Client
+from core.alerting import alert_on_role_change
+from core.audit import log_security_event, record_audit_event
+from core.models import AuditLog
 from .models import TeamRoleAssignment
 from .permissions import IsAdmin, IsAdminOrReadOnly, IsStaffMember, get_user_role
 from .serializers import TeamRoleSerializer, TeamUserListSerializer
@@ -58,6 +63,28 @@ def _provision_client_if_unstaffed(user):
 logger = logging.getLogger(__name__)
 
 
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """Password login, rate-limited — the stock view has no throttle at all.
+    Logging of each attempt happens in LoggingTokenObtainPairSerializer."""
+
+    serializer_class = LoggingTokenObtainPairSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+
+class ThrottledTokenRefreshView(TokenRefreshView):
+    """Token refresh, rate-limited for the same reason as login above."""
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "token_refresh"
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        outcome = "success" if response.status_code == 200 else "failure"
+        log_security_event("token_refresh", request, outcome=outcome)
+        return response
+
+
 class GoogleSignInView(APIView):
     """Accept a Google ID token and exchange it for application JWTs."""
 
@@ -73,28 +100,34 @@ class GoogleSignInView(APIView):
             identity = verify_google_id_token(serializer.validated_data["id_token"])
             user, created = authenticate_google_account(identity)
         except GoogleTokenVerificationError:
+            log_security_event("google_sign_in", request, outcome="failure", extra={"reason": "invalid_token"})
             return Response(
                 {"detail": "Google ID token is invalid, expired, revoked, or unverified."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         except GoogleTokenVerificationUnavailable:
+            log_security_event("google_sign_in", request, outcome="failure", extra={"reason": "verification_unavailable"})
             return Response(
                 {"detail": "Google token verification is temporarily unavailable."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except GoogleAccountLinkError:
+            log_security_event("google_sign_in", request, outcome="failure", extra={"reason": "account_link_conflict"})
             return Response(
                 {"detail": "This email is already linked to another Google account."},
                 status=status.HTTP_409_CONFLICT,
             )
         except ImproperlyConfigured:
             logger.exception("Google sign-in is not configured.")
+            log_security_event("google_sign_in", request, outcome="failure", extra={"reason": "not_configured"})
             return Response({"detail": "Authentication service is not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception:
             logger.exception("Unexpected Google sign-in failure.")
+            log_security_event("google_sign_in", request, outcome="failure", extra={"reason": "unexpected_error"})
             return Response({"detail": "Unable to complete sign-in."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         _provision_client_if_unstaffed(user)
+        log_security_event("google_sign_in", request, outcome="success", actor=user, extra={"created_account": created})
         refresh = RefreshToken.for_user(user)
         return Response(
             {
@@ -122,6 +155,7 @@ class EmailOTPRequestView(APIView):
         try:
             request_email_otp(email)
         except OtpCooldownError as exc:
+            log_security_event("otp_request", request, outcome="throttled", extra={"email": email})
             return Response(
                 {
                     "detail": "Please wait before requesting another code.",
@@ -131,11 +165,13 @@ class EmailOTPRequestView(APIView):
             )
         except Exception:
             logger.exception("Failed to send OTP email.")
+            log_security_event("otp_request", request, outcome="failure", extra={"email": email})
             return Response(
                 {"detail": "Unable to send verification code."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        log_security_event("otp_request", request, outcome="success", extra={"email": email})
         return Response({"detail": "Verification code sent.", "email": email}, status=status.HTTP_200_OK)
 
 
@@ -155,25 +191,30 @@ class EmailOTPVerifyView(APIView):
         try:
             user, created = verify_email_otp(email, code)
         except OtpNotFoundError:
+            log_security_event("otp_verify", request, outcome="failure", extra={"email": email, "reason": "not_found_or_expired"})
             return Response(
                 {"detail": "Code not found or expired. Please request a new one."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
         except OtpLockedError:
+            log_security_event("otp_verify", request, outcome="locked", extra={"email": email})
             return Response(
                 {"detail": "Too many incorrect attempts. Please request a new code."},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
         except OtpInvalidError as exc:
+            log_security_event("otp_verify", request, outcome="failure", extra={"email": email, "reason": "incorrect_code"})
             return Response(
                 {"detail": "Incorrect code.", "attempts_remaining": exc.attempts_remaining},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception:
             logger.exception("Unexpected OTP verification failure.")
+            log_security_event("otp_verify", request, outcome="failure", extra={"email": email, "reason": "unexpected_error"})
             return Response({"detail": "Unable to complete sign-in."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         _provision_client_if_unstaffed(user)
+        log_security_event("otp_verify", request, outcome="success", actor=user, extra={"email": email, "created_account": created})
         refresh = RefreshToken.for_user(user)
         return Response(
             {
@@ -201,6 +242,40 @@ class TeamManagementViewSet(viewsets.ModelViewSet):
         # this endpoint first must never silently become Admin.
         TeamRoleAssignment.objects.get_or_create(role_name='Admin')
         return super().get_queryset()
+
+    def _role_changes(self, instance):
+        return {
+            "role_name": instance.role_name,
+            "assigned_user_email": instance.assigned_user.email if instance.assigned_user else None,
+        }
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        changes = self._role_changes(instance)
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.ROLE_ASSIGNED,
+            target=instance, changes=changes, request=self.request,
+        )
+        alert_on_role_change(AuditLog.Action.ROLE_ASSIGNED, self.request.user.email, changes)
+
+    def perform_update(self, serializer):
+        before = self._role_changes(serializer.instance)
+        instance = serializer.save()
+        changes = {"before": before, "after": self._role_changes(instance)}
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.ROLE_ASSIGNED, target=instance,
+            changes=changes, request=self.request,
+        )
+        alert_on_role_change(AuditLog.Action.ROLE_ASSIGNED, self.request.user.email, changes)
+
+    def perform_destroy(self, instance):
+        changes = self._role_changes(instance)
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.ROLE_REMOVED, target=instance,
+            changes=changes, request=self.request,
+        )
+        alert_on_role_change(AuditLog.Action.ROLE_REMOVED, self.request.user.email, changes)
+        instance.delete()
 
     @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated, IsAdmin])
     def available_users(self, request):

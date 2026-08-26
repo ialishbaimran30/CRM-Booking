@@ -6,6 +6,8 @@ from django.db.models import Count, Sum, Q
 from django.utils import timezone
 from rest_framework.response import Response
 from accounts.permissions import IsStaffMember
+from core.audit import record_audit_event
+from core.models import AuditLog
 from .models import Client
 from .serializers import ClientSerializer, ClientDetailSerializer
 from booking.models import Booking
@@ -81,16 +83,29 @@ class ClientViewSet(viewsets.ModelViewSet):
         else:
             cache.clear()
 
-    def perform_create(self, serializer):  
-        serializer.save() 
+    def perform_create(self, serializer):
+        instance = serializer.save()
         self._clear_client_cache(self.request.user.id)
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.CLIENT_CREATED, target=instance,
+            changes={"full_name": instance.full_name, "email": instance.email}, request=self.request,
+        )
 
     def perform_update(self, serializer):
-        serializer.save()
+        instance = serializer.save()
         self._clear_client_cache(self.request.user.id)
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.CLIENT_UPDATED, target=instance,
+            changes={"full_name": instance.full_name, "email": instance.email}, request=self.request,
+        )
 
     def perform_destroy(self, instance):
         user_id = self.request.user.id
+        changes = {"full_name": instance.full_name, "email": instance.email}
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.CLIENT_DELETED, target=instance,
+            changes=changes, request=self.request,
+        )
         instance.delete()
         self._clear_client_cache(user_id)
 

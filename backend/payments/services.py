@@ -3,6 +3,9 @@ from uuid import uuid4
 
 from django.core.cache import cache
 
+from core.alerting import alert_on_invoice_void_or_refund
+from core.audit import record_audit_event
+from core.models import AuditLog
 from .models import Invoice, Payment
 
 
@@ -68,16 +71,22 @@ class BillingService:
         _bump_version(f"invoice_version_{user_id}")
         _bump_version(f"payment_version_{user_id}")
         _bump_version("booking_version_global")
+
+        record_audit_event(
+            actor=marked_by, action=AuditLog.Action.INVOICE_PAID, target=invoice,
+            changes={"payment_method": payment_method, "total_amount": str(invoice.total_amount)},
+        )
         return payment
 
     @staticmethod
-    def mark_invoice_unpaid(invoice):
+    def mark_invoice_unpaid(invoice, *, marked_by=None):
         """Reverses a paid invoice back to unpaid (distinct from a refund — no refund reason recorded)."""
         if invoice.status == Invoice.PaymentStatus.UNPAID:
             raise ValueError("This invoice is already unpaid.")
         if invoice.status == Invoice.PaymentStatus.REFUNDED:
             raise ValueError("A refunded invoice cannot be marked as unpaid.")
 
+        previous_status = invoice.status
         latest_payment = invoice.payments.filter(status=Payment.PaymentStatus.PAID).order_by("-id").first()
         if latest_payment:
             latest_payment.delete()
@@ -94,6 +103,11 @@ class BillingService:
         _bump_version(f"invoice_version_{user_id}")
         _bump_version(f"payment_version_{user_id}")
         _bump_version("booking_version_global")
+
+        record_audit_event(
+            actor=marked_by, action=AuditLog.Action.INVOICE_UNPAID, target=invoice,
+            changes={"before_status": previous_status, "after_status": invoice.status},
+        )
         return invoice
 
     @staticmethod
@@ -120,4 +134,12 @@ class BillingService:
         _bump_version(f"invoice_version_{user_id}")
         _bump_version(f"payment_version_{user_id}")
         _bump_version("booking_version_global")
+
+        changes = {"reason": reason, "total_amount": str(invoice.total_amount)}
+        record_audit_event(
+            actor=marked_by, action=AuditLog.Action.INVOICE_REFUNDED, target=invoice, changes=changes,
+        )
+        alert_on_invoice_void_or_refund(
+            "refunded", getattr(marked_by, "email", ""), str(invoice), changes,
+        )
         return invoice

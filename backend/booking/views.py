@@ -5,7 +5,10 @@ from rest_framework.decorators import action
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import time, timedelta, datetime
 from django.db import transaction, IntegrityError
-from accounts.permissions import IsAdminOrReadOnly, is_staff_member
+from accounts.permissions import IsAdminOrReadOnly, IsStaffMember, is_staff_member
+from core.alerting import alert_on_booking_cancellation_spike
+from core.audit import record_audit_event
+from core.models import AuditLog
 from notifications.services import CommunicationService
 from .models import Booking, Service, Waitlist
 from clients.models import Client
@@ -68,6 +71,14 @@ class BookingViewSet(viewsets.ModelViewSet):
     filterset_fields = ["status", "payment_status", "booking_date"]
     search_fields = ["client__full_name", "service_name", "booking_date"]
     ordering_fields = ["booking_date", "created_at", "client__full_name"]
+
+    def get_permissions(self):
+        # Deleting a booking cascades into its Invoice/Payment records, which
+        # are Staff-only elsewhere in the app — Clients must cancel instead
+        # (PATCH status=CANCELLED), never hard-delete.
+        if self.action == "destroy":
+            return [IsAuthenticated(), IsStaffMember()]
+        return super().get_permissions()
 
     def get_queryset(self):
         user = self.request.user
@@ -281,6 +292,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         slot_changed = (old_date, old_start, old_end) != (booking.booking_date, booking.start_time, booking.end_time)
         just_cancelled = old_status in ACTIVE_STATUSES and booking.status == Booking.BookingStatus.CANCELLED
         rescheduled = booking.status in ACTIVE_STATUSES and slot_changed
+        if just_cancelled:
+            record_audit_event(
+                actor=self.request.user, action=AuditLog.Action.BOOKING_CANCELLED, target=booking,
+                changes={"before_status": old_status, "after_status": booking.status}, request=self.request,
+            )
+            alert_on_booking_cancellation_spike()
         if just_cancelled or rescheduled:
             booking._waitlist_notified_count = notify_waitlist_for_freed_slot(old_date, old_start, old_end)
             _notify_waitlist_slot_available_in_app(old_date, old_start, old_end)
@@ -374,6 +391,15 @@ class BookingViewSet(viewsets.ModelViewSet):
         user_id = instance.created_by.id if instance.created_by else None
         old_date, old_start, old_end, old_status = (
             instance.booking_date, instance.start_time, instance.end_time, instance.status
+        )
+        record_audit_event(
+            actor=self.request.user, action=AuditLog.Action.BOOKING_DELETED, target=instance,
+            changes={
+                "status": old_status,
+                "booking_date": str(old_date),
+                "client_email": instance.client.email if instance.client else None,
+            },
+            request=self.request,
         )
 
         # Notify the booking's own client before the row is gone — the

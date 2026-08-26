@@ -89,6 +89,19 @@ class BookingSerializer(serializers.ModelSerializer):
             return None
         return float(_duration_hours(obj.start_time, obj.end_time))
 
+    def validate_status(self, value):
+        request = self.context.get("request")
+        user = request.user if request else None
+        if user and not is_staff_member(user):
+            if not self.instance:
+                # Clients never choose the initial status; the model default (PENDING) applies.
+                raise serializers.ValidationError("You cannot set a booking's status.")
+            if value != Booking.BookingStatus.CANCELLED:
+                raise serializers.ValidationError("You can only cancel your own booking.")
+            if self.instance.status == Booking.BookingStatus.CANCELLED:
+                raise serializers.ValidationError("This booking is already cancelled.")
+        return value
+
     def validate(self, data):
         request = self.context.get("request")
         user = request.user if request else None
