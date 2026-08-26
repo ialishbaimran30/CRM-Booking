@@ -4,10 +4,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .models import Notification
 from .serializers import NotificationSerializer
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
-from django.views.decorators.vary import vary_on_headers
-
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -18,10 +14,11 @@ class NotificationViewSet(viewsets.ModelViewSet):
         # Users can only view their own notifications (Notification Bell feature)
         return Notification.objects.filter(recipient=self.request.user).order_by("-created_at")
 
-    @method_decorator(cache_page(60 * 5))
-    @method_decorator(vary_on_headers("Authorization"))
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+    # M-4: no cache_page here — it keyed on Vary: Authorization, which is
+    # absent for session-authenticated requests (SessionAuthentication is
+    # enabled globally), collapsing every such caller onto one shared cache
+    # entry and leaking one user's notifications to another. The query
+    # itself is a single indexed lookup, so caching bought little anyway.
 
     def perform_create(self, serializer):
         serializer.save(recipient=self.request.user)

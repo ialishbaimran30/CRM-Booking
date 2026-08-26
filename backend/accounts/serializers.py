@@ -2,17 +2,36 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from core.alerting import alert_on_login_failure
 from core.audit import get_client_ip, log_security_event
+from .mfa import get_confirmed_device, verify_login_mfa
 from .models import TeamRoleAssignment
-from .permissions import get_user_role
+from .permissions import get_user_role, is_staff_member
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
 User = get_user_model()
 
 
+class MFARequiredError(serializers.ValidationError):
+    """A distinct shape from a generic bad-credentials error, so the
+    frontend can prompt for a code instead of showing 'invalid password'.
+    Response body: {"mfa_required": ["<message>"]}."""
+
+    def __init__(self, detail="An authentication code is required."):
+        super().__init__({"mfa_required": [detail]})
+
+
 class LoggingTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Logs every password-login attempt to the `security` logger
     (SecurityFeatures.md F-1) without ever logging the password itself —
-    only the submitted identifier (username_field, e.g. email) is captured."""
+    only the submitted identifier (username_field, e.g. email) is captured.
+
+    Also enforces F-2's second factor: staff with a confirmed TOTPDevice
+    must additionally submit a valid totp_code or recovery_code. Clients
+    are never required to enroll — is_staff_member(None-role) is always
+    False for them, so this is a no-op on the self-serve signup path.
+    """
+
+    totp_code = serializers.CharField(required=False, allow_blank=True, write_only=True, trim_whitespace=True)
+    recovery_code = serializers.CharField(required=False, allow_blank=True, write_only=True, trim_whitespace=True)
 
     def validate(self, attrs):
         request = self.context.get("request")
@@ -23,6 +42,31 @@ class LoggingTokenObtainPairSerializer(TokenObtainPairSerializer):
             log_security_event("login", request, outcome="failure", extra={"identifier": identifier})
             alert_on_login_failure(identifier, get_client_ip(request))
             raise
+
+        if is_staff_member(self.user):
+            device = get_confirmed_device(self.user)
+            if device:
+                totp_code = attrs.get("totp_code") or ""
+                recovery_code = attrs.get("recovery_code") or ""
+                if not totp_code and not recovery_code:
+                    log_security_event("login", request, outcome="mfa_required", actor=self.user, extra={"identifier": identifier})
+                    raise MFARequiredError()
+
+                ok, used_recovery = verify_login_mfa(device, totp_code, recovery_code)
+                if not ok:
+                    log_security_event(
+                        "login", request, outcome="failure", actor=self.user,
+                        extra={"identifier": identifier, "reason": "invalid_mfa_code"},
+                    )
+                    alert_on_login_failure(identifier, get_client_ip(request))
+                    raise MFARequiredError("Invalid authentication code.")
+
+                if used_recovery:
+                    log_security_event(
+                        "mfa_recovery_code_used", request, outcome="success", actor=self.user,
+                        extra={"identifier": identifier},
+                    )
+
         log_security_event("login", request, outcome="success", actor=self.user, extra={"identifier": identifier})
         return data
 

@@ -34,6 +34,8 @@ No CRITICAL findings: nothing is exploitable by a fully unauthenticated attacker
 
 **Update 2026-08-25:** All 5 HIGH findings and M-5 are now FIXED or PARTIALLY FIXED — see each entry's `Status` line. H-5's fix is only partial pending `L-5` (shared cache). H-3's underlying auto-claim bug was already absent from the code when reviewed; only the deterministic-ordering hardening was newly applied.
 
+**Update 2026-08-27:** All remaining MEDIUM findings are now FIXED or PARTIALLY FIXED — M-1, M-2, M-3, M-4 FIXED; M-6 PARTIALLY FIXED (exact version pins, not a full hash-verified lock file). Every HIGH and MEDIUM finding in this file now has a non-OPEN status. Remaining open work in this file is entirely LOW/INFORMATIONAL.
+
 Injection (A05:2025) is effectively absent: no raw SQL, no shell execution, no deserialization, no `eval`, no `mark_safe` anywhere in the backend, and no `dangerouslySetInnerHTML` anywhere in the frontend.
 
 | Severity | Count |
@@ -337,7 +339,7 @@ Apply the same treatment to `TokenRefreshView` (`urls.py:22`), which is likewise
 #### M-1 — Logout is client-side only; refresh tokens stay valid for 7 days after sign-out
 **Severity:** MEDIUM · **Class:** Session Management Failure
 **OWASP:** A07:2025 · **ASVS 5.0:** 7.4.1 [L1] — "after logout or expiry, the session cannot be used again"
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — `accounts/views.py::LogoutView` (`POST /api/accounts/logout/`) blacklists the submitted refresh token server-side; idempotent on a missing/already-blacklisted token. `ACCESS_TOKEN_LIFETIME` shortened from 1 day to 15 minutes — safe now that `frontend/src/api/axiosInstance.js` has a refresh-on-401 interceptor (added alongside this fix; previously there was none, exactly as this entry noted). Both frontend logout paths (`App.js` and the separately-implemented `ClientSidebar.js`) now call the real endpoint via a shared `frontend/src/api/authService.js::logout()` instead of only clearing `localStorage`.
 
 **Location**
 - `frontend/src/App.js:136-138` — logout handler: `localStorage.removeItem('access_token' / 'refresh_token' / 'user')`
@@ -385,7 +387,7 @@ Consider also shortening `ACCESS_TOKEN_LIFETIME` to ~15 minutes (`settings.py:16
 #### M-2 — Google Calendar encryption key is `sha256(SECRET_KEY)` — no independent rotation path
 **Severity:** MEDIUM · **Class:** Cryptographic Failure / Key Management
 **OWASP:** A04:2025 · **ASVS 5.0:** 11.4.1, 14.x (data protection at rest)
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — `booking/crypto.py` now reads `settings.CALENDAR_TOKEN_KEYS`, independent of `SECRET_KEY`, using `MultiFernet` (comma-separated, first key encrypts, all keys decrypt) for rotation without downtime. `CALENDAR_TOKEN_KEY` env var, dev-only fallback when `DEBUG=true`, raises `ImproperlyConfigured` if unset in production (same fail-closed pattern as `H-2`). Rotation supported via `python manage.py rotate_calendar_key` (`booking/management/commands/`). **Deployment note carried over from this entry's own remediation**: any *existing* `GoogleCalendarCredential` row encrypted under the old `sha256(SECRET_KEY)` scheme will not decrypt under the new key and must be reconnected once via `/admin-tools/google-calendar/connect/` after this deploys — documented in `.env.example`.
 
 **Location** — `backend/booking/crypto.py:14-16`, `def _fernet`
 
@@ -435,7 +437,7 @@ For rotation support, prefer `MultiFernet` — accept a comma-separated list whe
 #### M-3 — JWT access token is sent in the WebSocket URL query string
 **Severity:** MEDIUM · **Class:** Data Protection / Information Exposure
 **OWASP:** A04:2025 · **ASVS 5.0:** 14.2.1 [L1] — "sensitive data travels in the body or headers, never the URL or query string"
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — implemented this entry's own "lower-effort alternative": the token now travels as a WebSocket subprotocol (`new WebSocket(url, ["jwt", token])` in `frontend/src/hooks/useNotificationSocket.js`) instead of a `?token=` query param. `notifications/middleware.py::JWTAuthMiddleware` reads `scope["subprotocols"]` instead of the query string; `notifications/consumers.py` echoes `subprotocol="jwt"` back on accept (required by the WS handshake once a client offers a subprotocol list). Verified end-to-end with `channels.testing.WebsocketCommunicator` (`notifications/tests.py`), including that the old query-string transport no longer authenticates at all. Same caveat as before: shortening `ACCESS_TOKEN_LIFETIME` (now done, see `M-1`) further bounds any residual exposure.
 
 **Location**
 - `frontend/src/hooks/useNotificationSocket.js:26` — `new WebSocket(\`${WS_BASE_URL}/ws/notifications/?token=${encodeURIComponent(token)}\`)`
@@ -464,7 +466,7 @@ Whichever you choose, also shorten `ACCESS_TOKEN_LIFETIME` per **M-1**.
 #### M-4 — `cache_page` on per-user endpoints can serve one user's data to another
 **Severity:** MEDIUM · **Class:** Broken Access Control / Security Misconfiguration
 **OWASP:** A01:2025, A02:2025 · **ASVS 5.0:** 8.2.2
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — took this entry's own recommended "cleanest fix": removed `cache_page`/`vary_on_headers` entirely from `notifications/views.py::NotificationViewSet.list` and `dashboard/views.py::DashboardSummaryView.get` rather than trying to key the cache more carefully. Both are single indexed/aggregated queries — cheap enough that caching wasn't buying much, and removing it closes the cross-user disclosure outright rather than mitigating it. `resources/views.py`'s `cache_page` usage was left as-is per this entry's own note (its querysets are global/identical for every caller, so there's nothing to leak).
 
 **Location**
 - `backend/notifications/views.py:21-24` — `NotificationViewSet.list`, decorated `@method_decorator(cache_page(60 * 5))` + `@method_decorator(vary_on_headers("Authorization"))`
@@ -557,7 +559,7 @@ Fix this together with **H-4** — they are the same surface, and H-4's remediat
 #### M-6 — Backend dependencies are unpinned ranges with no lock file
 **Severity:** MEDIUM · **Class:** Software Supply Chain Failure
 **OWASP:** A03:2025 · **ASVS 5.0:** 15.x (secure coding and architecture / dependency management)
-**Status: OPEN**
+**Status: PARTIALLY FIXED 2026-08-27** — `requirements.txt` now pins every dependency to the exact version already running (`Django==5.2.16`, etc.) instead of open ranges, so a build of a given commit is reproducible rather than re-resolving to "whatever's newest on PyPI today." **Not done**: the fuller `pip-compile --generate-hashes` + `--require-hashes` lock-file setup this entry's own remediation describes, which would add integrity verification (not just version pinning) and is a materially bigger change to the build (new lock file, Dockerfile install step, a process for regenerating it). Pair with `F-10` (CI dependency scanning, still open) when that lands.
 
 **Location** — `backend/requirements.txt:1-13`; consumed at `backend/Dockerfile:11-12` (`COPY requirements.txt .` / `RUN pip install --no-cache-dir -r requirements.txt`).
 

@@ -1,14 +1,18 @@
 from io import StringIO
 from unittest.mock import patch
 
+import pyotp
+from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from clients.models import Client
+from core.models import AuditLog
 
 from .management.commands.ensure_admin_seat import ADMIN_EMAIL
-from .models import TeamRoleAssignment, User
+from .models import TeamRoleAssignment, TOTPDevice, User
 from .permissions import get_user_role
 from .views import _provision_client_if_unstaffed
 
@@ -161,3 +165,261 @@ class EnsureAdminSeatCommandTests(TestCase):
 
         admin_seat = TeamRoleAssignment.objects.get(role_name="Admin")
         self.assertIsNone(admin_seat.assigned_user)
+
+
+def _make_staff(email, role="Booking Manager", password="test-pass-12345"):
+    user = User.objects.create_user(username=email.split("@")[0], email=email, password=password)
+    TeamRoleAssignment.objects.create(role_name=role, assigned_user=user)
+    return user
+
+
+class MFAEnrollmentTests(TestCase):
+    """F-2: enrollment (setup -> confirm) and its guardrails."""
+
+    def setUp(self):
+        self.staff = _make_staff("mfastaff@example.com")
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(user=self.staff)
+
+    def test_setup_issues_a_pending_device(self):
+        response = self.api_client.post("/api/accounts/mfa/setup/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("secret", response.data)
+        self.assertIn("otpauth_uri", response.data)
+        device = TOTPDevice.objects.get(user=self.staff)
+        self.assertFalse(device.confirmed)
+        self.assertEqual(device.secret, response.data["secret"])
+
+    def test_confirm_with_wrong_code_fails_and_leaves_device_unconfirmed(self):
+        self.api_client.post("/api/accounts/mfa/setup/")
+        response = self.api_client.post("/api/accounts/mfa/confirm/", {"code": "000000"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(TOTPDevice.objects.get(user=self.staff).confirmed)
+
+    def test_confirm_with_correct_code_enables_mfa_and_issues_recovery_codes(self):
+        setup_response = self.api_client.post("/api/accounts/mfa/setup/")
+        secret = setup_response.data["secret"]
+        code = pyotp.TOTP(secret).now()
+
+        response = self.api_client.post("/api/accounts/mfa/confirm/", {"code": code}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(response.data["recovery_codes"]), 8)
+
+        device = TOTPDevice.objects.get(user=self.staff)
+        self.assertTrue(device.confirmed)
+        self.assertEqual(device.recovery_codes.count(), 8)
+        self.assertTrue(AuditLog.objects.filter(action=AuditLog.Action.MFA_ENABLED).exists())
+
+    def test_confirm_twice_is_rejected(self):
+        setup_response = self.api_client.post("/api/accounts/mfa/setup/")
+        code = pyotp.TOTP(setup_response.data["secret"]).now()
+        self.api_client.post("/api/accounts/mfa/confirm/", {"code": code}, format="json")
+
+        response = self.api_client.post("/api/accounts/mfa/confirm/", {"code": code}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_status_reflects_enrollment(self):
+        response = self.api_client.get("/api/accounts/mfa/status/")
+        self.assertEqual(response.data, {"enabled": False})
+
+        setup_response = self.api_client.post("/api/accounts/mfa/setup/")
+        code = pyotp.TOTP(setup_response.data["secret"]).now()
+        self.api_client.post("/api/accounts/mfa/confirm/", {"code": code}, format="json")
+
+        response = self.api_client.get("/api/accounts/mfa/status/")
+        self.assertEqual(response.data, {"enabled": True})
+
+    def test_clients_cannot_reach_mfa_endpoints(self):
+        client_user = User.objects.create_user(
+            username="plainclient2", email="plainclient2@example.com", password="test-pass-12345"
+        )
+        api_client = APIClient()
+        api_client.force_authenticate(user=client_user)
+        response = api_client.post("/api/accounts/mfa/setup/")
+        self.assertEqual(response.status_code, 403)
+
+
+class MFALoginFlowTests(TestCase):
+    """F-2: the password-login endpoint enforces MFA once a staff member
+    has a confirmed device, and never for staff without one or for Clients."""
+
+    def setUp(self):
+        # H-5's login throttle counts against a shared cache that persists
+        # across tests (unlike the DB, the cache isn't transactionally
+        # rolled back) — clear it so one test's login attempts don't push
+        # another test over the 5/min scope and 429 it.
+        cache.clear()
+        self.staff = _make_staff("mfalogin@example.com")
+        self.api_client = APIClient()
+
+    def _enroll(self, user):
+        from django.contrib.auth.hashers import make_password
+
+        secret = pyotp.random_base32()
+        device = TOTPDevice.objects.create(user=user, secret=secret, confirmed=True)
+        raw_code = "recoverycode123"
+        device.recovery_codes.create(code_hash=make_password(raw_code))
+        return device, raw_code
+
+    def test_staff_without_mfa_logs_in_normally(self):
+        response = self.api_client.post(
+            "/api/accounts/login/", {"username": self.staff.username, "password": "test-pass-12345"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access", response.data)
+
+    def test_staff_with_mfa_is_blocked_without_a_code(self):
+        self._enroll(self.staff)
+        response = self.api_client.post(
+            "/api/accounts/login/", {"username": self.staff.username, "password": "test-pass-12345"}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mfa_required", response.data)
+        self.assertNotIn("access", response.data)
+
+    def test_staff_with_mfa_logs_in_with_correct_totp_code(self):
+        device, _raw_recovery = self._enroll(self.staff)
+        code = pyotp.TOTP(device.secret).now()
+        response = self.api_client.post(
+            "/api/accounts/login/",
+            {"username": self.staff.username, "password": "test-pass-12345", "totp_code": code},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("access", response.data)
+
+    def test_staff_with_mfa_rejects_wrong_totp_code(self):
+        self._enroll(self.staff)
+        response = self.api_client.post(
+            "/api/accounts/login/",
+            {"username": self.staff.username, "password": "test-pass-12345", "totp_code": "000000"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("mfa_required", response.data)
+
+    def test_recovery_code_works_once_then_is_rejected(self):
+        _device, raw_code = self._enroll(self.staff)
+
+        response = self.api_client.post(
+            "/api/accounts/login/",
+            {"username": self.staff.username, "password": "test-pass-12345", "recovery_code": raw_code},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        response = self.api_client.post(
+            "/api/accounts/login/",
+            {"username": self.staff.username, "password": "test-pass-12345", "recovery_code": raw_code},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_clients_are_never_prompted_for_mfa(self):
+        client_user = User.objects.create_user(
+            username="mfaclient", email="mfaclient@example.com", password="test-pass-12345"
+        )
+        response = self.api_client.post(
+            "/api/accounts/login/", {"username": client_user.username, "password": "test-pass-12345"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class LogoutViewTests(TestCase):
+    """M-1: logout actually blacklists the refresh token server-side."""
+
+    def test_logout_blacklists_the_refresh_token(self):
+        user = User.objects.create_user(
+            username="logoutuser", email="logoutuser@example.com", password="test-pass-12345"
+        )
+        refresh = RefreshToken.for_user(user)
+
+        api_client = APIClient()
+        api_client.force_authenticate(user=user)
+        response = api_client.post("/api/accounts/logout/", {"refresh": str(refresh)}, format="json")
+        self.assertEqual(response.status_code, 205)
+
+        # A blacklisted refresh token must no longer work.
+        api_client.force_authenticate(user=None)
+        refresh_response = api_client.post("/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json")
+        self.assertEqual(refresh_response.status_code, 401)
+
+    def test_logout_without_a_refresh_token_still_succeeds(self):
+        user = User.objects.create_user(
+            username="logoutuser2", email="logoutuser2@example.com", password="test-pass-12345"
+        )
+        api_client = APIClient()
+        api_client.force_authenticate(user=user)
+        response = api_client.post("/api/accounts/logout/", {}, format="json")
+        self.assertEqual(response.status_code, 205)
+
+
+class TransferAdminSeatCommandTests(TestCase):
+    """F-4: the break-glass Admin-transfer command."""
+
+    def test_dry_run_previews_without_changing_anything(self):
+        admin_row = TeamRoleAssignment.objects.create(role_name="Admin", assigned_user=None)
+        target = User.objects.create_user(username="newadmin", email="newadmin@example.com", password="test-pass-12345")
+
+        call_command("transfer_admin_seat", "--to", target.email, stdout=StringIO())
+
+        admin_row.refresh_from_db()
+        self.assertIsNone(admin_row.assigned_user)
+
+    def test_confirm_transfers_and_writes_an_audit_entry(self):
+        current_admin = User.objects.create_user(
+            username="oldadmin", email="oldadmin@example.com", password="test-pass-12345"
+        )
+        admin_row = TeamRoleAssignment.objects.create(role_name="Admin", assigned_user=current_admin)
+        target = User.objects.create_user(
+            username="newadmin2", email="newadmin2@example.com", password="test-pass-12345"
+        )
+
+        call_command("transfer_admin_seat", "--to", target.email, "--confirm", stdout=StringIO())
+
+        admin_row.refresh_from_db()
+        self.assertEqual(admin_row.assigned_user_id, target.id)
+        entry = AuditLog.objects.get(action=AuditLog.Action.ADMIN_SEAT_TRANSFERRED)
+        self.assertEqual(entry.changes["transferred_from"], current_admin.email)
+        self.assertEqual(entry.changes["transferred_to"], target.email)
+
+    def test_refuses_a_nonexistent_target(self):
+        with self.assertRaises(CommandError):
+            call_command("transfer_admin_seat", "--to", "nobody@example.com", "--confirm", stdout=StringIO())
+
+
+class PwnedPasswordValidatorTests(TestCase):
+    """F-3: breach screening — mocked throughout, so the test suite never
+    depends on real network access to the HIBP API."""
+
+    @patch("accounts.validators.requests.get")
+    def test_rejects_a_password_found_in_the_range_response(self, mock_get):
+        import hashlib
+
+        from django.core.exceptions import ValidationError
+
+        from .validators import PwnedPasswordValidator
+
+        password = "definitely-pwned-password"
+        suffix = hashlib.sha1(password.encode()).hexdigest().upper()[5:]
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = f"{suffix}:12345\nAAAAA0000000000000000000000000000:1"
+
+        with self.assertRaises(ValidationError):
+            PwnedPasswordValidator().validate(password)
+
+    @patch("accounts.validators.requests.get")
+    def test_accepts_a_password_not_in_the_range_response(self, mock_get):
+        from .validators import PwnedPasswordValidator
+
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = "AAAAA0000000000000000000000000000:1\nBBBBB1111111111111111111111111111:2"
+        PwnedPasswordValidator().validate("some-password-not-in-the-list")  # must not raise
+
+    def test_fails_open_when_the_api_is_unavailable(self):
+        import requests
+
+        from .validators import PwnedPasswordValidator
+
+        with patch("accounts.validators.requests.get", side_effect=requests.RequestException("boom")):
+            PwnedPasswordValidator().validate("any-password-at-all")  # must not raise

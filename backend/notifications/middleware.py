@@ -1,11 +1,12 @@
 """JWT authentication for WebSocket connections.
 
-Browsers can't attach an Authorization header to a WebSocket handshake, so
-the client passes the same JWT access token it already uses for REST calls
-as a query parameter instead: ws://host/ws/notifications/?token=<access_token>
+M-3 fix: browsers can't attach an Authorization header to a WebSocket
+handshake, so the access token used to travel as a `?token=` query
+parameter — which meant it ended up in reverse-proxy/CDN access logs and
+browser history as a live, replayable bearer credential. It now travels as
+a WebSocket subprotocol instead (`new WebSocket(url, ["jwt", token])`),
+which is not part of the request line or query string that gets logged.
 """
-from urllib.parse import parse_qs
-
 from channels.db import database_sync_to_async
 from channels.middleware import BaseMiddleware
 from django.contrib.auth.models import AnonymousUser
@@ -26,12 +27,14 @@ def _get_user_from_token(token):
 
 
 class JWTAuthMiddleware(BaseMiddleware):
-    """Resolves scope["user"] from a `?token=` query param using the
-    project's existing SimpleJWT access tokens — the same auth mechanism
-    already used for every REST API request."""
+    """Resolves scope["user"] from the Sec-WebSocket-Protocol header —
+    ASGI exposes it as scope["subprotocols"], a list parsed from that
+    header — expecting exactly ["jwt", "<access_token>"], using the
+    project's existing SimpleJWT access tokens (the same auth mechanism
+    already used for every REST API request)."""
 
     async def __call__(self, scope, receive, send):
-        query_string = scope.get("query_string", b"").decode()
-        token = parse_qs(query_string).get("token", [None])[0]
+        subprotocols = scope.get("subprotocols") or []
+        token = subprotocols[1] if len(subprotocols) >= 2 and subprotocols[0] == "jwt" else None
         scope["user"] = await _get_user_from_token(token) if token else AnonymousUser()
         return await super().__call__(scope, receive, send)

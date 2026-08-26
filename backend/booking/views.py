@@ -72,6 +72,14 @@ class BookingViewSet(viewsets.ModelViewSet):
     search_fields = ["client__full_name", "service_name", "booking_date"]
     ordering_fields = ["booking_date", "created_at", "client__full_name"]
 
+    def get_throttles(self):
+        # F-6: booking writes trigger Calendar sync + email + (on cancel)
+        # waitlist broadcasts — expensive enough to deserve a tighter,
+        # dedicated scope on top of the general 'user' throttle.
+        if self.action in ("create", "update", "partial_update"):
+            self.throttle_scope = "booking_write"
+        return super().get_throttles()
+
     def get_permissions(self):
         # Deleting a booking cascades into its Invoice/Payment records, which
         # are Staff-only elsewhere in the app — Clients must cancel instead

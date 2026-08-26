@@ -25,6 +25,8 @@ class AuditLog(models.Model):
         CLIENT_UPDATED = "client_updated", "Client updated"
         CLIENT_DELETED = "client_deleted", "Client deleted"
         BOOKING_CANCELLED = "booking_cancelled", "Booking cancelled"
+        MFA_ENABLED = "mfa_enabled", "MFA enabled"
+        ADMIN_SEAT_TRANSFERRED = "admin_seat_transferred", "Admin seat transferred"
         BOOKING_DELETED = "booking_deleted", "Booking deleted"
 
     timestamp = models.DateTimeField(auto_now_add=True, db_index=True)

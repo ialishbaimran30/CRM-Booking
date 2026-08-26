@@ -23,7 +23,9 @@ export default function useNotificationSocket(enabled, onNotification) {
 
     let socket;
     try {
-      socket = new WebSocket(`${WS_BASE_URL}/ws/notifications/?token=${encodeURIComponent(token)}`);
+      // M-3: token travels as a WebSocket subprotocol, not a URL query
+      // param, so it never ends up in access logs or browser history.
+      socket = new WebSocket(`${WS_BASE_URL}/ws/notifications/`, ["jwt", token]);
     } catch (err) {
       console.error('Failed to open notification WebSocket', err);
       return undefined;

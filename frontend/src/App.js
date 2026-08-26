@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import api from './api/axiosInstance';
+import { logout as logoutRequest } from './api/authService';
 import { isStaffUser } from './utils/session';
 import { notificationService } from './api/notificationService';
 import useNotificationSocket from './hooks/useNotificationSocket';
@@ -133,9 +134,9 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    localStorage.removeItem('user');
+    // Fire-and-forget: logoutRequest() clears localStorage itself and
+    // never throws, but the UI shouldn't wait on the network round-trip.
+    logoutRequest();
     setUser(null);
   };
 

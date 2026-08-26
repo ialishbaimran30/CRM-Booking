@@ -2,10 +2,11 @@ import logging
 
 from django.core.exceptions import ImproperlyConfigured
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .serializers import (
@@ -35,7 +36,8 @@ from clients.models import Client
 from core.alerting import alert_on_login_failure, alert_on_role_change
 from core.audit import get_client_ip, log_security_event, record_audit_event
 from core.models import AuditLog
-from .models import TeamRoleAssignment
+from .mfa import confirm_enrollment, start_enrollment
+from .models import TeamRoleAssignment, TOTPDevice
 from .permissions import IsAdmin, IsAdminOrReadOnly, IsStaffMember, get_user_role
 from .serializers import TeamRoleSerializer, TeamUserListSerializer
 from django.contrib.auth.models import User
@@ -83,6 +85,86 @@ class ThrottledTokenRefreshView(TokenRefreshView):
         outcome = "success" if response.status_code == 200 else "failure"
         log_security_event("token_refresh", request, outcome=outcome)
         return response
+
+
+class LogoutView(APIView):
+    """M-1: real server-side logout. Blacklists the submitted refresh
+    token so it can no longer be exchanged for new access tokens — the
+    frontend previously only cleared localStorage, leaving the refresh
+    token (up to REFRESH_TOKEN_LIFETIME) usable by anyone who had a copy
+    of it. Idempotent: a missing or already-blacklisted token still counts
+    as a successful logout, since the end state either way is the same —
+    the token cannot be used again."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        refresh = request.data.get("refresh")
+        if refresh:
+            try:
+                RefreshToken(refresh).blacklist()
+            except TokenError:
+                pass
+        log_security_event("logout", request, outcome="success", actor=request.user)
+        return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
+class MFAStatusView(APIView):
+    """F-2: whether the current staff member has MFA enabled — lets the
+    frontend decide between showing "Enable MFA" or "MFA is on"."""
+
+    permission_classes = [IsAuthenticated, IsStaffMember]
+
+    def get(self, request):
+        device = TOTPDevice.objects.filter(user=request.user).first()
+        return Response({"enabled": bool(device and device.confirmed)})
+
+
+class MFASetupView(APIView):
+    """F-2 step 1: issue a new (unconfirmed) TOTP secret and its
+    provisioning URI, for the frontend to render as a QR code. Calling
+    this again before confirming replaces the pending device — harmless,
+    since nothing is enforced until MFAConfirmView succeeds."""
+
+    permission_classes = [IsAuthenticated, IsStaffMember]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "mfa_setup"
+
+    def post(self, request):
+        device, otpauth_uri = start_enrollment(request.user)
+        return Response({"secret": device.secret, "otpauth_uri": otpauth_uri})
+
+
+class MFAConfirmView(APIView):
+    """F-2 step 2: confirm enrollment with a code from the authenticator
+    app. Returns one-time recovery codes on success — the only time they
+    are ever available in the clear, so the frontend must show them to
+    the user immediately."""
+
+    permission_classes = [IsAuthenticated, IsStaffMember]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "mfa_setup"
+
+    def post(self, request):
+        code = str(request.data.get("code", "")).strip()
+        device = TOTPDevice.objects.filter(user=request.user).first()
+        if not device:
+            return Response(
+                {"detail": "No pending MFA enrollment — call setup first."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if device.confirmed:
+            return Response({"detail": "MFA is already enabled for this account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        recovery_codes = confirm_enrollment(device, code)
+        if recovery_codes is None:
+            log_security_event("mfa_enrollment", request, outcome="failure", actor=request.user)
+            return Response({"detail": "Incorrect code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        record_audit_event(actor=request.user, action=AuditLog.Action.MFA_ENABLED, target=device, request=request)
+        log_security_event("mfa_enrollment", request, outcome="success", actor=request.user)
+        return Response(
+            {"detail": "MFA enabled.", "recovery_codes": recovery_codes}, status=status.HTTP_201_CREATED
+        )
 
 
 class GoogleSignInView(APIView):

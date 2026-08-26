@@ -106,6 +106,12 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsAdmin()]
         return super().get_permissions()
 
+    def get_throttles(self):
+        # F-6: PDF rendering is CPU work per request — give it its own scope.
+        if self.action == "pdf":
+            self.throttle_scope = "pdf"
+        return super().get_throttles()
+
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):
         """Mark invoice as paid — applying discount/coupon validation."""

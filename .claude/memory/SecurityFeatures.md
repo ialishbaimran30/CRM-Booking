@@ -60,6 +60,8 @@ Three gaps change this system's security posture more than anything else on the 
 
 **Update 2026-08-26:** `F-1` is FIXED. `F-9` (alerting/off-box-shipping) is code-complete and tested but not yet production-verified — see that entry. The Admin MFA/recovery gap (`F-2`/`F-4`) and the key-management gap (`F-5`) are both still open.
 
+**Update 2026-08-27:** `F-2`, `F-3`, `F-4`, and `F-6` are now FIXED — see each entry. `F-5` (secret/key-management runbook) remains the only open item in the EXPECTED band. RECOMMENDED and MATURITY items (`F-7`, `F-8`, `F-10`–`F-15`) are unchanged from the original audit.
+
 | Band | Count |
 |---|---|
 | EXPECTED | 6 |
@@ -121,7 +123,7 @@ Assessed and found **not applicable** to this system, one line each:
 
 #### F-2 — Multi-factor authentication for the Admin seat
 **Band:** EXPECTED · **ASVS 5.0:** 6.3.3 [L2] — "MFA, or a documented combination of single factors"
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — TOTP-based second factor for all staff (Admin and Booking Manager, not Clients). `accounts/models.py::TOTPDevice`/`TOTPRecoveryCode`, service logic in `accounts/mfa.py`, enrollment endpoints `POST /api/accounts/mfa/setup/` + `/confirm/` (`accounts/views.py`), enforced at login in `accounts/serializers.py::LoggingTokenObtainPairSerializer` — staff with a confirmed device must submit `totp_code` or a one-time `recovery_code`, returned only once at enrollment (hashed at rest). A wrong/missing code returns a distinct `{"mfa_required": [...]}` shape so the frontend can prompt rather than show "invalid password," and also feeds the existing F-9 `alert_on_login_failure` rate-based alert. Not built: any frontend UI for enrollment or the login-time code prompt — this is a backend-only pass; the API contract is stable and documented above for whoever builds that next. Not built: a self-service "disable MFA" endpoint (deliberately — see the file's own reasoning that this would be new attack surface); today disabling requires deleting the `TOTPDevice` row directly, matching this codebase's existing break-glass pattern.
 
 **Why this system needs it.** The Admin is a **single seat enforced by a DB constraint** (`accounts_single_admin_seat`) that controls staff role assignment for everyone else, invoice refunds and discounts, and the Admin-only dashboard and reports modules. Concentrating that much authority in one account without a second factor makes that one credential the whole system's security boundary. ASVS 5.0 puts MFA at L2, and this system is classified L2.
 
@@ -144,7 +146,7 @@ A nuance worth recording so this is not over- or under-stated: the **email OTP p
 
 #### F-3 — Breached-password screening and a staff password policy
 **Band:** EXPECTED · **ASVS 5.0:** 6.2.12 [L2] (breached-password set), 6.2.4 [L1] (top-3000 common passwords)
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — `accounts/validators.py::PwnedPasswordValidator` checks new passwords against the HIBP Pwned Passwords range API via k-anonymity (only the first 5 hex chars of the SHA-1 hash ever leave the process); wired into `AUTH_PASSWORD_VALIDATORS`. Fails open (logged, not silent) if the API is unreachable — a third-party outage must not block every password change. `MinimumLengthValidator` raised from 8 to 12. Per ASVS 6.2.5/6.2.7/6.2.10, deliberately did **not** add composition rules or forced rotation. Same caveat as always: this only runs wherever Django already invokes `validate_password` (admin forms, `createsuperuser`, `changepassword`) — there is still no self-service password-change API endpoint in this app for it to guard.
 
 **Why this system needs it.** Staff — including the Admin — authenticate with passwords through `TokenObtainPairView`. Those passwords guard client PII and financial records. ASVS puts breached-password checking at L2.
 
@@ -170,7 +172,7 @@ A further gap worth noting: these validators run in Django's `set_password` flow
 
 #### F-4 — Break-glass recovery for the single Admin seat
 **Band:** EXPECTED · **ASVS 5.0:** 6.3.x (authentication lifecycle), 8.2.1 (function-level access)
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — `accounts/management/commands/transfer_admin_seat.py`, a general `--to <email> [--confirm]` command (dry-run preview by default), requiring server/shell access as its authorization gate — same shape as the superuser-claim precedent this app already used elsewhere. Always writes an `AuditLog` entry (`AuditLog.Action.ADMIN_SEAT_TRANSFERRED`) so a break-glass transfer is never silent. Full procedure documented in `backend/ADMIN_RECOVERY.md`. Distinct from the pre-existing `ensure_admin_seat` command, which is a narrow, single-hardcoded-email fixup tool, not a general recovery path — left untouched. Not built: changing `assigned_user` to `on_delete=PROTECT` (item 3 in this entry's original "what to build") — deliberately skipped, since `H-3`'s fix already removed the silent-auto-claim danger that made vacancy risky in the first place; revisit if that changes.
 
 **Why this system needs it.** This gap is specific to this system's deliberate design, not a generic "have a recovery process" note. `accounts/models.py` enforces `accounts_single_admin_seat` — a `UniqueConstraint` permitting exactly **one** Admin row — and `TeamRoleSerializer.validate` actively refuses to create a second Admin ("transfer the existing Admin seat instead"). Meanwhile `assigned_user` uses `on_delete=SET_NULL`, so deleting the Admin's user account **vacates the seat rather than removing it**. The system therefore has exactly one holder of its highest privilege and no sanctioned way to replace them from inside the application.
 
@@ -216,7 +218,7 @@ What exists instead is worse than nothing: the **de facto** recovery path today 
 
 #### F-6 — Baseline anti-automation across the API
 **Band:** EXPECTED · **ASVS 5.0:** 6.3.1 [L1] (anti-automation), 2.2.1 (business-expectation validation)
-**Status: OPEN**
+**Status: FIXED 2026-08-27** — `DEFAULT_THROTTLE_CLASSES` now includes `AnonRateThrottle`/`UserRateThrottle` alongside the existing `ScopedRateThrottle`, so every endpoint has a baseline limit (anon 60/min, user 300/min) instead of only the three previously-scoped auth views. Added dedicated scopes for the expensive endpoints named in the original remediation: `booking_write` (20/hour, booking create/update), `pdf` (30/hour, `InvoiceViewSet.pdf`), `report` (60/hour, both `reports` views and `DashboardSummaryView`). Same caveat as `H-5`: **`L-5` (shared cache) is still open**, so these limits are per-process, not cluster-wide, until that lands.
 
 **Why this system needs it.** The client side is **public self-serve**, so every authenticated-user endpoint is reachable by anyone willing to register. Several of those endpoints are expensive or drive outbound side effects: booking creation writes to Google Calendar and sends email, `InvoiceViewSet.pdf` renders a PDF per request, the reports endpoints load and aggregate every invoice in Python (`I-6`), and booking updates trigger waitlist email broadcasts to third parties (`M-5`).
 

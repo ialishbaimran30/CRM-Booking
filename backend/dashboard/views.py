@@ -6,9 +6,6 @@ from accounts.permissions import IsAdmin
 from clients.models import Client
 from booking.models import Booking
 from django.utils import timezone
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
-from django.views.decorators.vary import vary_on_headers
 from payments.models import Payment
 
 class DashboardSummaryView(APIView):
@@ -17,8 +14,11 @@ class DashboardSummaryView(APIView):
     """
     # The Dashboard module is Admin-only — Booking Managers land on Clients instead.
     permission_classes = [IsAuthenticated, IsAdmin]
-    @method_decorator(cache_page(60 * 5))
-    @method_decorator(vary_on_headers("Authorization"))
+    throttle_scope = "report"  # F-6
+
+    # M-4: no cache_page here — see notifications/views.py for why
+    # (Vary: Authorization is absent for session-authenticated requests,
+    # collapsing every such caller onto one shared, per-user-data cache entry).
     def get(self, request, *args, **kwargs):
         user = request.user
 

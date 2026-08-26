@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { logout as logoutRequest } from '../api/authService';
 
 export default function ClientSidebar() {
   const location = useLocation();
@@ -7,7 +8,12 @@ export default function ClientSidebar() {
   const isActive = (path) => location.pathname.startsWith(path);
 
   const handleLogout = () => {
-    localStorage.clear();
+    // logoutRequest() blacklists the refresh token server-side (M-1) and
+    // clears the auth keys itself; clear anything else (e.g.
+    // cleared_notification_ids) separately rather than a blanket
+    // localStorage.clear(), which would race with it.
+    logoutRequest();
+    localStorage.removeItem('cleared_notification_ids');
     navigate('/login');
   };
 

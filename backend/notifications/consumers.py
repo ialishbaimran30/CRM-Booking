@@ -16,7 +16,9 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             return
         self.group_name = f"user_{user.id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
+        # Echo the "jwt" subprotocol back (M-3) — required by the WebSocket
+        # handshake once the client offers a subprotocol list.
+        await self.accept(subprotocol="jwt")
 
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):

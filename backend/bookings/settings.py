@@ -32,6 +32,17 @@ if not SECRET_KEY:
         )
 ALLOWED_HOSTS = [host for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host]
 
+# M-2: the Google Calendar refresh token's encryption key, independent of
+# SECRET_KEY (see booking/crypto.py for why). Comma-separated so an old key
+# can be kept around during rotation — first key encrypts, all keys decrypt.
+_calendar_token_key_raw = os.getenv("CALENDAR_TOKEN_KEY", "")
+if _calendar_token_key_raw:
+    CALENDAR_TOKEN_KEYS = [k.strip() for k in _calendar_token_key_raw.split(",") if k.strip()]
+elif DEBUG:
+    CALENDAR_TOKEN_KEYS = ["ZTWgMGeUPRAayCwzPduwuemG0x77zz9DTzkT8ZFdoRQ="]  # insecure dev-only key
+else:
+    CALENDAR_TOKEN_KEYS = []  # booking/crypto.py raises ImproperlyConfigured if this is ever used
+
 INSTALLED_APPS = [
     "daphne",
     "django_filters",
@@ -107,9 +118,13 @@ else:
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    # F-3: raised from Django's default of 8. Per ASVS 6.2.5/6.2.7, length
+    # + breach screening (below) is the modern guidance — deliberately not
+    # adding character-composition rules or forced rotation.
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 12}},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    {"NAME": "accounts.validators.PwnedPasswordValidator"},  # F-3
 ]
 
 LANGUAGE_CODE = "en-us"
@@ -150,13 +165,27 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "EXCEPTION_HANDLER": "core.exceptions.logging_exception_handler",
-    "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
+    # F-6: a baseline throttle on every endpoint, not just the three
+    # auth-scoped ones — previously anything without an explicit
+    # throttle_scope was completely unthrottled. Same caveat as H-5: these
+    # limits are per-process until L-5 (a shared cache backend) is fixed.
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.ScopedRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
     "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "300/min",
         "google_auth": "10/min",
         "otp_request": "5/min",
         "otp_verify": "10/min",
         "login": "5/min",
         "token_refresh": "20/min",
+        "booking_write": "20/hour",
+        "pdf": "30/hour",
+        "report": "60/hour",
+        "mfa_setup": "10/hour",  # F-2: enrollment/confirm — not a hot path
     },
 }
 CACHES = {
@@ -175,7 +204,13 @@ CHANNEL_LAYERS = {
     }
 }
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
+    # M-1: shortened from 1 day. This bounds the damage window of a leaked
+    # access token (e.g. M-3's now-fixed WebSocket-URL exposure, or any
+    # future leak) to minutes instead of a full day. Safe to shorten now
+    # that the frontend has a refresh-on-401 interceptor
+    # (frontend/src/api/axiosInstance.js) — without that, this would log
+    # users out mid-session instead of transparently refreshing.
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,

@@ -11,6 +11,7 @@ from django.core.cache import cache
 class DashboardSummaryAPIView(APIView):
     # Reports are an Admin-only module — Booking Managers have no access.
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_scope = "report"  # F-6: aggregates over every invoice — not free
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request):
         user_id = request.user.id
@@ -31,6 +32,7 @@ class DashboardSummaryAPIView(APIView):
 class PeriodicReportAPIView(APIView):
     # Reports are an Admin-only module — Booking Managers have no access.
     permission_classes = [IsAuthenticated, IsAdmin]
+    throttle_scope = "report"  # F-6: aggregates over every invoice — not free
     @method_decorator(vary_on_headers("Authorization"))
     def get(self, request):
         user_id = request.user.id
