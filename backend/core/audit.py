@@ -13,18 +13,34 @@ identifiers (emails, ids) and business field values.
 
 import logging
 
+from django.conf import settings
+
 security_logger = logging.getLogger("security")
 
 
 def get_client_ip(request):
-    """Best-effort source IP. Trusts X-Forwarded-For because Azure App
-    Service (and any reverse proxy in front of this app) sets it — see
-    SECURE_PROXY_SSL_HEADER in settings.py for the same trust assumption."""
+    """Best-effort source IP, trusting only settings.TRUSTED_PROXY_COUNT hops
+    of X-Forwarded-For — the same setting REST_FRAMEWORK["NUM_PROXIES"] uses
+    for DRF's own throttle identity (bookings/settings.py), so the IP this
+    records in every security log line / AuditLog row / failed-login alert
+    never disagrees with what the throttle itself trusts.
+
+    H-6: this used to take X-Forwarded-For's *first* comma-separated value —
+    the position a client controls outright — so both the throttle and this
+    function's callers (log_security_event, record_audit_event, and the
+    failed-login alert's "ip" scope in core/alerting.py) trusted a fully
+    attacker-suppliable value. Confirmed by live testing: a different fake
+    header per request defeated IP-based throttling entirely and would have
+    logged whatever IP the attacker chose to claim.
+    """
     if request is None:
         return None
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+    num_proxies = getattr(settings, "TRUSTED_PROXY_COUNT", 1)
+    if forwarded_for and num_proxies:
+        addrs = [addr.strip() for addr in forwarded_for.split(",") if addr.strip()]
+        if addrs:
+            return addrs[-min(num_proxies, len(addrs))]
     return request.META.get("REMOTE_ADDR")
 
 

@@ -54,3 +54,10 @@ admin superuser access already implies.
   break-glass recovery.
 - There is deliberately no automatic seat-claiming on login, for anyone,
   superuser or not (see H-3). Do not reintroduce one.
+- This break-glass procedure runs `transfer_admin_seat` via shell access,
+  not via a web login — it is unaffected by M-7's MFA requirement on
+  Django's `/admin/` site. If you *also* need to sign into `/admin/` (e.g.
+  to inspect data via Django's own model views) and you've enrolled MFA
+  through the CRM's `/mfa/setup/` + `/confirm/` flow, that same code (or a
+  recovery code) is required there too — there is no separate "disable
+  MFA for recovery" bypass, by design.

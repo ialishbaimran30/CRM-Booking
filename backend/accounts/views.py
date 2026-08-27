@@ -36,7 +36,7 @@ from clients.models import Client
 from core.alerting import alert_on_login_failure, alert_on_role_change
 from core.audit import get_client_ip, log_security_event, record_audit_event
 from core.models import AuditLog
-from .mfa import confirm_enrollment, start_enrollment
+from .mfa import confirm_enrollment, get_confirmed_device, start_enrollment, verify_reauth
 from .models import TeamRoleAssignment, TOTPDevice
 from .permissions import IsAdmin, IsAdminOrReadOnly, IsStaffMember, get_user_role
 from .serializers import TeamRoleSerializer, TeamUserListSerializer
@@ -124,13 +124,40 @@ class MFASetupView(APIView):
     """F-2 step 1: issue a new (unconfirmed) TOTP secret and its
     provisioning URI, for the frontend to render as a QR code. Calling
     this again before confirming replaces the pending device — harmless,
-    since nothing is enforced until MFAConfirmView succeeds."""
+    since nothing is enforced until MFAConfirmView succeeds.
+
+    M-7: if the user already has a CONFIRMED device, replacing it is a
+    security-critical change and requires proof the caller still controls
+    the account — a valid session/access token alone is not enough (a
+    stolen token could otherwise silently lock the real user out and hand
+    the attacker a durable second factor). Provide any one of
+    current_password, totp_code (from the existing device), or
+    recovery_code."""
 
     permission_classes = [IsAuthenticated, IsStaffMember]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "mfa_setup"
 
     def post(self, request):
+        existing_device = get_confirmed_device(request.user)
+        if existing_device:
+            reauth_ok = verify_reauth(
+                request.user, existing_device,
+                current_password=request.data.get("current_password", ""),
+                totp_code=request.data.get("totp_code", ""),
+                recovery_code=request.data.get("recovery_code", ""),
+            )
+            if not reauth_ok:
+                log_security_event("mfa_reenroll_blocked", request, outcome="failure", actor=request.user)
+                return Response(
+                    {
+                        "detail": "Re-authentication required to replace your existing MFA device. "
+                        "Provide your current password, a code from your authenticator app, or a recovery code."
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            log_security_event("mfa_reenroll_authorized", request, outcome="success", actor=request.user)
+
         device, otpauth_uri = start_enrollment(request.user)
         return Response({"secret": device.secret, "otpauth_uri": otpauth_uri})
 

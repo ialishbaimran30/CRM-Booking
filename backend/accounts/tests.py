@@ -2,10 +2,12 @@ from io import StringIO
 from unittest.mock import patch
 
 import pyotp
+from django.contrib.auth.hashers import make_password
 from django.core import mail
 from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
+from django.test import Client as DjangoTestClient
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -178,6 +180,7 @@ class MFAEnrollmentTests(TestCase):
     """F-2: enrollment (setup -> confirm) and its guardrails."""
 
     def setUp(self):
+        cache.clear()  # mfa_setup is a shared, cross-test-class throttle scope (10/hour)
         self.staff = _make_staff("mfastaff@example.com")
         self.api_client = APIClient()
         self.api_client.force_authenticate(user=self.staff)
@@ -238,6 +241,84 @@ class MFAEnrollmentTests(TestCase):
         api_client.force_authenticate(user=client_user)
         response = api_client.post("/api/accounts/mfa/setup/")
         self.assertEqual(response.status_code, 403)
+
+
+class MFAReenrollmentReauthTests(TestCase):
+    """M-7: replacing an already-confirmed device requires proof the
+    caller still controls the account -- a valid session/access token
+    alone (e.g. a stolen one) must not be enough. First-time enrollment
+    (covered by MFAEnrollmentTests above) needs no such proof."""
+
+    def setUp(self):
+        # mfa_setup is a shared, cross-test-class throttle scope (10/hour);
+        # clear it so this class's own repeated /mfa/setup/ calls across
+        # its several tests don't push another test class over the limit,
+        # or get pushed over it themselves depending on run order.
+        cache.clear()
+        self.staff = _make_staff("reenroll@example.com")
+        self.original_secret = pyotp.random_base32()
+        self.device = TOTPDevice.objects.create(user=self.staff, secret=self.original_secret, confirmed=True)
+        self.raw_recovery_code = "reenrollrecoverycode"
+        self.device.recovery_codes.create(code_hash=make_password(self.raw_recovery_code))
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(user=self.staff)
+
+    def test_setup_without_any_reauth_is_rejected_and_device_is_unchanged(self):
+        response = self.api_client.post("/api/accounts/mfa/setup/")
+        self.assertEqual(response.status_code, 403)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.secret, self.original_secret)
+        self.assertTrue(self.device.confirmed)
+
+    def test_setup_with_wrong_password_is_rejected(self):
+        response = self.api_client.post(
+            "/api/accounts/mfa/setup/", {"current_password": "not-the-real-password"}, format="json"
+        )
+        self.assertEqual(response.status_code, 403)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.secret, self.original_secret)
+
+    def test_setup_with_correct_password_is_allowed(self):
+        response = self.api_client.post(
+            "/api/accounts/mfa/setup/", {"current_password": "test-pass-12345"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        # A new pending device now exists (old confirmed one replaced) --
+        # not yet confirmed until /mfa/confirm/ completes.
+        device = TOTPDevice.objects.get(user=self.staff)
+        self.assertNotEqual(device.secret, self.original_secret)
+        self.assertFalse(device.confirmed)
+
+    def test_setup_with_a_valid_code_from_the_existing_device_is_allowed(self):
+        code = pyotp.TOTP(self.original_secret).now()
+        response = self.api_client.post("/api/accounts/mfa/setup/", {"totp_code": code}, format="json")
+        self.assertEqual(response.status_code, 200)
+
+    def test_setup_with_a_valid_recovery_code_is_allowed(self):
+        response = self.api_client.post(
+            "/api/accounts/mfa/setup/", {"recovery_code": self.raw_recovery_code}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_stolen_session_cannot_silently_replace_a_confirmed_device(self):
+        # Simulates a stolen/hijacked access token: authenticated as the
+        # victim, but with none of password/old-code/recovery-code.
+        attacker_session = APIClient()
+        attacker_session.force_authenticate(user=self.staff)
+
+        setup_resp = attacker_session.post("/api/accounts/mfa/setup/")
+        self.assertEqual(setup_resp.status_code, 403)
+
+        confirm_resp = attacker_session.post(
+            "/api/accounts/mfa/confirm/", {"code": pyotp.TOTP(self.original_secret).now()}, format="json"
+        )
+        # No pending device was ever created, so confirm has nothing to act on.
+        self.assertEqual(confirm_resp.status_code, 400)
+
+        # The victim's original code still works.
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.secret, self.original_secret)
+        self.assertTrue(self.device.confirmed)
 
 
 class MFALoginFlowTests(TestCase):
@@ -474,3 +555,121 @@ class OtpRequestPurposeTests(TestCase):
             "/api/accounts/otp/request/", {"email": "mixedcase@example.com", "purpose": "login"}, format="json"
         )
         self.assertEqual(response.status_code, 200)
+
+
+class LoginThrottleBypassTests(TestCase):
+    """H-6: DRF's anonymous-request throttle identity (and
+    core.audit.get_client_ip) must trust only settings.TRUSTED_PROXY_COUNT
+    hops of X-Forwarded-For, not the raw client-suppliable header. Each
+    scenario simulates the real deployment shape: a trusted proxy (Azure)
+    appends its own observed IP as the trailing hop, while an attacker
+    fully controls everything before it."""
+
+    def setUp(self):
+        cache.clear()
+        self.api_client = APIClient()
+
+    def test_throttle_survives_a_spoofed_forwarded_for_prefix(self):
+        # Same trusted (trailing) hop on every request, as a real Azure
+        # front-end would produce, but a different attacker-chosen prefix
+        # each time -- simulating header spoofing against a single real client.
+        codes = []
+        for i in range(6):
+            response = self.api_client.post(
+                "/api/accounts/login/",
+                {"username": "nobody", "password": "wrong"},
+                format="json",
+                HTTP_X_FORWARDED_FOR=f"{i}.{i}.{i}.{i}, 203.0.113.99",
+            )
+            codes.append(response.status_code)
+        self.assertEqual(codes, [401, 401, 401, 401, 401, 429])
+
+    def test_different_real_clients_are_throttled_independently(self):
+        # Two distinct real clients (distinct trusted trailing hop) must not
+        # share a throttle bucket just because both also spoof a prefix.
+        for _ in range(5):
+            self.api_client.post(
+                "/api/accounts/login/", {"username": "nobody", "password": "wrong"}, format="json",
+                HTTP_X_FORWARDED_FOR="1.1.1.1, 203.0.113.10",
+            )
+        response = self.api_client.post(
+            "/api/accounts/login/", {"username": "nobody", "password": "wrong"}, format="json",
+            HTTP_X_FORWARDED_FOR="9.9.9.9, 203.0.113.20",
+        )
+        self.assertEqual(response.status_code, 401)  # a genuinely different real client, not yet throttled
+
+    def test_five_failures_still_alert_regardless_of_header_spoofing(self):
+        # Existing behaviour (must stay unchanged): 5 failed attempts for
+        # the same identifier within 300s trigger the admin alert. Each
+        # attempt here also spoofs a different trusted trailing hop, so
+        # this proves the "account" scope alone is enough to fire it --
+        # the fix doesn't accidentally make the alert IP-dependent.
+        mail.outbox = []
+        with override_settings(ADMINS=[("Security", "sec@example.com")]):
+            for i in range(5):
+                self.api_client.post(
+                    "/api/accounts/login/", {"username": "alertvictim", "password": "wrong"}, format="json",
+                    HTTP_X_FORWARDED_FOR=f"{i}.{i}.{i}.{i}, 203.0.113.{i}",
+                )
+        self.assertTrue(any("failed logins" in m.subject for m in mail.outbox))
+
+
+class DjangoAdminMFATests(TestCase):
+    """M-7: Django's own /admin/ site is a second, equally privileged admin
+    surface (reachable by anyone with is_superuser=True) that F-2's MFA
+    never covered. Enrolling MFA via the CRM's own flow must also gate
+    /admin/login/, using Django's session-based auth (not the DRF APIClient
+    used elsewhere in this file)."""
+
+    def setUp(self):
+        self.secret = pyotp.random_base32()
+        self.superuser = User.objects.create_superuser(
+            username="adminmfasuper", email="adminmfasuper@example.com", password="test-pass-12345"
+        )
+        TOTPDevice.objects.create(user=self.superuser, secret=self.secret, confirmed=True)
+
+    def test_login_without_a_code_is_rejected(self):
+        client = DjangoTestClient()
+        client.post("/admin/login/", {"username": "adminmfasuper", "password": "test-pass-12345"})
+        self.assertNotIn("_auth_user_id", client.session)
+
+    def test_login_with_a_wrong_code_is_rejected(self):
+        client = DjangoTestClient()
+        client.post(
+            "/admin/login/", {"username": "adminmfasuper", "password": "test-pass-12345", "totp_code": "000000"}
+        )
+        self.assertNotIn("_auth_user_id", client.session)
+
+    def test_login_with_the_correct_code_succeeds(self):
+        client = DjangoTestClient()
+        code = pyotp.TOTP(self.secret).now()
+        client.post(
+            "/admin/login/", {"username": "adminmfasuper", "password": "test-pass-12345", "totp_code": code}
+        )
+        self.assertIn("_auth_user_id", client.session)
+
+    def test_login_with_a_valid_recovery_code_succeeds(self):
+        raw_code = "adminrecoverycode1"
+        device = TOTPDevice.objects.get(user=self.superuser)
+        device.recovery_codes.create(code_hash=make_password(raw_code))
+
+        client = DjangoTestClient()
+        client.post(
+            "/admin/login/", {"username": "adminmfasuper", "password": "test-pass-12345", "totp_code": raw_code}
+        )
+        self.assertIn("_auth_user_id", client.session)
+
+    def test_superuser_without_enrolled_mfa_is_unaffected(self):
+        User.objects.create_superuser(
+            username="plainadminsuper", email="plainadminsuper@example.com", password="test-pass-12345"
+        )
+        client = DjangoTestClient()
+        client.post("/admin/login/", {"username": "plainadminsuper", "password": "test-pass-12345"})
+        self.assertIn("_auth_user_id", client.session)
+
+    def test_stolen_password_alone_cannot_reach_admin_for_an_enrolled_account(self):
+        # Simulates an attacker who obtained the password (e.g. reuse from
+        # a breach) but not the second factor.
+        client = DjangoTestClient()
+        client.post("/admin/login/", {"username": "adminmfasuper", "password": "test-pass-12345"})
+        self.assertNotIn("_auth_user_id", client.session)

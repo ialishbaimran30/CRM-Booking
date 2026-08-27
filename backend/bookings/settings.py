@@ -154,11 +154,30 @@ GOOGLE_CALENDAR_REDIRECT_URI = os.getenv(
 )
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 
+# H-6: number of reverse-proxy hops between the client and this app that are
+# actually trusted to append their own observed IP to X-Forwarded-For — used
+# below for REST_FRAMEWORK["NUM_PROXIES"] and by core/audit.py::get_client_ip
+# (one source of truth for both, so throttling and audit-log IPs never
+# disagree). Defaults to 1: a bare Azure App Service front-end, which
+# appends the real connecting IP as the last comma-separated value. Without
+# this, DRF's throttle identity — and our own logged/alerted IP — trusted
+# the raw, entirely client-suppliable header value, so an attacker could
+# defeat every anonymous-context rate limit (login, OTP, Google auth, MFA
+# setup) by sending a different fake X-Forwarded-For on every request —
+# confirmed by live testing (SecurityIssues.md H-6). Set this to match the
+# real number of trusted hops if Azure Front Door / Application Gateway is
+# ever added in front of App Service — setting it *higher* than the actual
+# trusted hop count is dangerous (an attacker can pad the header with fake
+# entries to land back on a client-controlled position), so when in doubt
+# prefer leaving it low over raising it speculatively.
+TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ),
+    "NUM_PROXIES": TRUSTED_PROXY_COUNT,
      "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
 
