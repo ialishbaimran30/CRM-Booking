@@ -4,6 +4,9 @@ import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGri
 import toast from 'react-hot-toast';
 import { extractErrorMessage } from '../utils/apiError';
 
+const API_BASE_URL = (process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:8000/api').replace(/\/$/, '');
+const reportsApiUrl = (path) => `${API_BASE_URL}${path}`;
+
 export default function ReportsView() {
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState('monthly'); // daily, weekly, monthly
@@ -23,7 +26,7 @@ export default function ReportsView() {
       const token = localStorage.getItem('access_token');
       const headers = { 'Authorization': `Bearer ${token}` };
 
-      const res = await fetch(`/api/reports/periodic/?period=${period}`, { headers });
+      const res = await fetch(`${reportsApiUrl('/reports/periodic/')}?period=${period}`, { headers });
       
       if (res.ok) {
         const data = await res.json();
