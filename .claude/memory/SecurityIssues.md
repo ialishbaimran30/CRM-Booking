@@ -36,16 +36,18 @@ No CRITICAL findings: nothing is exploitable by a fully unauthenticated attacker
 
 **Update 2026-08-27:** All remaining MEDIUM findings are now FIXED or PARTIALLY FIXED — M-1, M-2, M-3, M-4 FIXED; M-6 PARTIALLY FIXED (exact version pins, not a full hash-verified lock file). Every HIGH and MEDIUM finding in this file now has a non-OPEN status. Remaining open work in this file is entirely LOW/INFORMATIONAL.
 
+**Update 2026-08-27 (full re-audit, same day):** A full re-audit re-verified every fixed finding against the current code (all confirmed intact, 68/68 tests passing) and live-tested several controls rather than only reading code. Two new findings surfaced and are now tracked: **H-6** (IP throttling trusts a spoofable `X-Forwarded-For` header — bypasses every anonymous rate limit in the app, live-verified, now the single highest-priority open item in this file) and **M-7** (MFA re-enrollment needs no proof of prior possession — a stolen session can silently replace a staff member's second factor, live-verified). `L-4`'s entry was updated with live-verification evidence and its now-larger blast radius. A new informational entry, **I-7**, records the deliberate account-enumeration trade-off from the Login-page OTP fix (accepted risk, not a defect).
+
 Injection (A05:2025) is effectively absent: no raw SQL, no shell execution, no deserialization, no `eval`, no `mark_safe` anywhere in the backend, and no `dangerouslySetInnerHTML` anywhere in the frontend.
 
 | Severity | Count |
 |---|---|
 | CRITICAL | 0 |
-| HIGH | 5 |
-| MEDIUM | 6 |
+| HIGH | 6 |
+| MEDIUM | 7 |
 | LOW | 7 |
-| INFORMATIONAL / HARDENING | 6 |
-| **Total** | **24** |
+| INFORMATIONAL / HARDENING | 7 |
+| **Total** | **27** |
 
 ---
 
@@ -332,6 +334,27 @@ Apply the same treatment to `TokenRefreshView` (`urls.py:22`), which is likewise
 
 ---
 
+#### H-6 — IP-based throttling trusts a client-spoofable `X-Forwarded-For` header, letting every anonymous rate limit be bypassed entirely
+**Severity:** HIGH · **Class:** Authentication Failure / Security-Control Bypass
+**OWASP:** A07:2025 · **ASVS 5.0:** 6.3.1 [L1] — anti-automation controls must actually be effective
+**Status: OPEN — newly discovered and live-verified during the 2026-08-27 audit.** Not caught by the original audit because it's a DRF-library IP-resolution default, not application code — outside the original scan's file list.
+
+**Location** — no `REST_FRAMEWORK["NUM_PROXIES"]` is set anywhere in `bookings/settings.py`. The actual defect lives in `rest_framework.throttling.SimpleRateThrottle.get_ident()` (third-party code): when `NUM_PROXIES` is unset (DRF's own default, `None`), it uses the **entire raw `X-Forwarded-For` header value, verbatim**, as the throttle identity for any unauthenticated request — no validation, no fixed trusted position.
+
+**Evidence — live-verified, not just traced.** Sent 10 consecutive `POST /api/accounts/login/` requests with wrong credentials, each carrying a different attacker-chosen `X-Forwarded-For` (`10.0.0.0`…`10.0.0.9`). All 10 returned `401`; the 5/min login throttle (`H-5`) never engaged once. This is not specific to login — it affects **every anonymous-context throttle in the app**: `login`, `otp_request`, `otp_verify`, `google_auth`, `mfa_setup`, and the global `anon` scope (`F-6`) — because all of them resolve identity through the same DRF method for unauthenticated callers.
+
+**Attack scenario.** An Anonymous attacker credential-stuffs `/api/accounts/login/`, brute-forces OTP/MFA codes, or spams `otp/request` to exhaust the Gmail SMTP quota, at effectively unlimited rate, by sending a fresh `X-Forwarded-For` value on every request — trivial to automate. This fully reopens `H-5`'s original risk **regardless of whether `L-5` (shared cache) is ever fixed** — a perfect shared Redis cache does not help if the cache *key* itself is attacker-controlled per request.
+
+**Whether this is exploitable in the live deployment depends on one runtime fact** not verifiable from code: whether Azure App Service's front-end overwrites `X-Forwarded-For` or appends to whatever the client sent. Azure App Service's documented default is to **append** the real client IP as an additional comma-separated value, not replace the header — meaning the attacker-controlled portion survives in the string DRF actually uses as the cache key (since `NUM_PROXIES=None` uses the whole joined string, not a specific trusted position). Confirm against the live deployment, but the code-level default is unsafe either way — see *Areas needing manual testing*.
+
+**Remediation.** Set `REST_FRAMEWORK["NUM_PROXIES"] = 1` (one trusted hop — the Azure App Service front-end) so DRF extracts the correct single trusted IP position instead of the raw string. Confirm the exact hop count against the real Azure topology first (Front Door/Application Gateway in front of App Service adds a hop).
+
+**Verification.** Repeat the live test above after the fix: 6+ rapid login attempts with a spoofed `X-Forwarded-For` on every request must still return `429` once the real client's own attempt count crosses 5, regardless of what the spoofed header claims.
+
+**Why (preserved reasoning).** Traced: no `NUM_PROXIES` setting → DRF's `get_ident()` falls through to its unset-`NUM_PROXIES` branch → uses the raw, attacker-suppliable `X-Forwarded-For` string as the throttle cache key for every unauthenticated request. Stale if `NUM_PROXIES` is set, or if a different IP-resolution mechanism replaces DRF's default.
+
+---
+
 ### MEDIUM
 
 ---
@@ -592,6 +615,31 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 ---
 
+#### M-7 — MFA re-enrollment requires no proof of prior possession; a stolen session can silently replace a staff member's second factor
+**Severity:** MEDIUM · **Class:** Broken Authentication / Session-Hijacking Escalation
+**OWASP:** A07:2025 · **ASVS 5.0:** step-up authentication principle (6.x) — changing an active second factor should itself require re-authentication, not just a valid session
+**Status: OPEN — newly discovered and live-verified during the 2026-08-27 audit, while reviewing the `F-2` implementation.**
+
+**Location**
+- `accounts/views.py::MFASetupView` / `MFAConfirmView` — gated only by `IsAuthenticated, IsStaffMember`, no re-authentication step.
+- `accounts/mfa.py::start_enrollment()` — `TOTPDevice.objects.filter(user=user).delete()` runs unconditionally before creating the new pending device, whether or not an existing device is already confirmed.
+
+**Evidence — live-verified.** With a victim staff account already holding a confirmed `TOTPDevice`, a second, independently-authenticated session for the same user (simulating a stolen/hijacked access token — no password, no old TOTP code, no recovery code supplied) successfully called `/mfa/setup/` then `/mfa/confirm/` with a self-generated code, silently replacing the victim's device. The victim's original TOTP code was then rejected at login (`400`).
+
+**Attack scenario.** An attacker who obtains a staff member's access token by any means (a future XSS, a compromised device, a leaked log — `M-3` already closed the WebSocket-URL leak vector specifically, but any other leak works too) can, within that token's 15-minute life (`M-1`), permanently entrench their access by re-enrolling MFA under their own control — durably outliving the stolen token and locking the legitimate user out. This is a **post-compromise persistence** mechanism, not an initial-compromise vector — it requires an attacker to already hold a valid token — but it converts a bounded, 15-minute token theft into unbounded account takeover, and specifically defeats the purpose of the MFA control this same audit cycle added.
+
+**Impact.** Bounded by requiring a pre-existing token compromise, but high-consequence once that precondition holds: durable staff account takeover plus victim lockout, with no distinguishing signal in the security log (`mfa_enrollment`/`outcome: success` fires identically for a first-time enrollment and a hostile replacement).
+
+**Remediation.** Require re-authentication before allowing MFA setup/confirm to replace an **already-confirmed** device: the current password, a valid code from the existing device, or a recovery code. First-time enrollment (no existing confirmed device) needs no such check — there's nothing to prove prior possession of yet.
+
+**Ripple effects.** Frontend work needed once a re-enrollment UI exists at all (`F-2` shipped backend-only). No migration.
+
+**Verification.** Repeat the live test above after the fix: `/mfa/setup/` (or `/confirm/`) for a user with an existing confirmed device must require and validate a re-authentication factor before replacing it; without one, it must be rejected.
+
+**Why (preserved reasoning).** Traced: `IsAuthenticated, IsStaffMember` is the only gate on both MFA endpoints → `start_enrollment()` deletes any existing device unconditionally → `MFAConfirmView` accepts a self-generated code with no check against the device it's replacing. Stale if re-authentication is added before replacing a confirmed device.
+
+---
+
 ### LOW
 
 ---
@@ -612,7 +660,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 ---
 
 #### L-4 — `cache.clear()` on client writes flushes DRF throttle counters
-`backend/clients/views.py:77-82`, `def _clear_client_cache`, falls back to `cache.clear()` when the backend has no `delete_pattern` — which is always, since `LocMemCache` (`settings.py:146-152`) has no such method. So **every** client create/update/delete wipes the entire cache, including the DRF `ScopedRateThrottle` counters for `otp_request`, `otp_verify`, and `google_auth`. A staff member editing clients repeatedly resets the anti-automation window for anonymous attackers. **Fix:** track cache keys explicitly, or move to Redis and use real pattern deletion; never `cache.clear()` a cache shared with throttling. Better: give throttling its own cache alias via `DEFAULT_THROTTLE_CACHE`. Verify by exhausting the OTP throttle, triggering a client update, and confirming the throttle is **still** in effect. **Status: OPEN** (A06:2025)
+`backend/clients/views.py:77-82`, `def _clear_client_cache`, falls back to `cache.clear()` when the backend has no `delete_pattern` — which is always, since `LocMemCache` (`settings.py:146-152`) has no such method. So **every** client create/update/delete wipes the entire cache, including the DRF `ScopedRateThrottle` counters for `login`, `otp_request`, `otp_verify`, `google_auth`, and `mfa_setup`, plus `F-9`'s alert-dedup cache (`core/alerting.py`) — the blast radius has grown since this entry was first written, as more features have landed on the same shared cache. A staff member editing clients repeatedly resets the anti-automation window for anonymous attackers. **2026-08-27: live-verified, not just traced** — exhausted the login throttle (5 wrong-password attempts → `429` on the 6th), had a staff member create a client, then confirmed the very next login attempt returned `401` again instead of `429`: the throttle was fully reset by an unrelated, routine staff action. **Fix:** track cache keys explicitly, or move to Redis and use real pattern deletion; never `cache.clear()` a cache shared with throttling. Better: give throttling its own cache alias via `DEFAULT_THROTTLE_CACHE`. **Status: OPEN** (A06:2025)
 
 ---
 
@@ -665,6 +713,11 @@ Both workflows pin actions to moving major tags (`actions/checkout@v4`/`@v3`, `d
 
 ---
 
+#### I-7 — Login-page OTP request deliberately reveals account existence (accepted risk)
+`accounts/views.py::EmailOTPRequestView` now checks, for `purpose="login"` only, whether a `User` exists for the submitted email before issuing an OTP — returning `404 {"detail": "No account exists with this email. Please register first."}` if not, with no OTP generated. This is a deliberate, explicitly-requested product decision (distinct Login vs Signup pages in `AuthScreen.js`), not an oversight — recorded here so a future audit doesn't re-flag it as a fresh finding without this context. It is a standard, narrow account-enumeration trade-off: an anonymous caller can determine whether a given email has an account by POSTing to `otp/request` with `purpose=login`, bounded by the existing `otp_request` throttle (5/min — itself subject to `H-6`'s bypass until that's fixed). `purpose="signup"` (the default) is completely unaffected and never reveals existence. **Status: ACCEPTED RISK — explicit product decision, scoped to the Login page only.**
+
+---
+
 ## Most critical issues
 
 Fix these five before any production exposure:
@@ -674,6 +727,8 @@ Fix these five before any production exposure:
 3. **H-2** — the app boots with a publicly-known `SECRET_KEY` instead of refusing to start.
 4. **H-3** — a Booking Manager becomes Admin by loading a page.
 5. **H-4** — a Client can permanently delete financial records.
+
+**Update 2026-08-27 (full re-audit):** All five original HIGHs above are FIXED and verified intact — spot-checked against the current code after several rounds of subsequent work, and covered by passing tests. However, **H-6 was newly discovered and live-verified this cycle, and effectively un-fixes H-5 and F-6**: DRF's IP-throttle identity trusts a client-spoofable `X-Forwarded-For` header, so every anonymous rate limit in the app (login, OTP, Google auth, MFA setup) can be bypassed entirely by rotating that header per request — demonstrated live, not just traced. **H-6 is now the single highest-priority item in this file**, ahead of the LOW/hardening band. `M-7` (MFA re-enrollment needs no proof of prior possession) was also newly found and live-verified, MEDIUM severity since it requires a pre-existing token compromise.
 
 ## Highest-priority hardening
 
@@ -705,6 +760,8 @@ Name these explicitly so a future session does not "fix" what is already correct
 6. **M-1** — logout endpoint, then shorten the access-token lifetime (needs the 401 interceptor first).
 7. **M-4**, **M-3**, **M-2**, **M-6**, then the LOW band.
 
+**Update 2026-08-27:** all of the above are done. Current order for what's left: **H-6** first (`NUM_PROXIES` — a one-line settings fix that closes a full bypass of every anonymous throttle in the app), then **M-7** (MFA re-authentication before replacing a confirmed device), then **L-5** (shared cache — makes H-5/H-6/F-6/F-9 accurate cluster-wide instead of per-process), then the rest of the LOW band.
+
 ## Areas needing further manual testing (runtime only)
 
 These cannot be settled from source and must be checked against the live deployment:
@@ -717,3 +774,4 @@ These cannot be settled from source and must be checked against the live deploym
 - **Is `DJANGO_DEBUG` false in production?** If true, error pages leak stack traces and settings (A02/A10).
 - **Strength of `EMAIL_HOST_PASSWORD` (Gmail App Password) and whether the Google Calendar refresh token is still valid.**
 - **Number of Daphne workers**, which determines the real multiplier on every rate limit (**L-5**) and whether notifications are silently dropping (**I-5**).
+- **Exact `X-Forwarded-For` behavior at the Azure edge** (relates to **H-6**) — how many hops Azure App Service (plus Front Door/Application Gateway if present) actually adds, so `NUM_PROXIES` can be set to the correct value rather than guessed.
