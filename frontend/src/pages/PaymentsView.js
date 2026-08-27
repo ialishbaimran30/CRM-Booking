@@ -4,6 +4,9 @@ import { StatusBadge } from '../components/common/StatusBadge';
 import toast from 'react-hot-toast';
 import { extractErrorMessage } from '../utils/apiError';
 
+const API_BASE_URL = (process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:8000/api').replace(/\/$/, '');
+const paymentsApiUrl = (path) => `${API_BASE_URL}${path}`;
+
 export default function PaymentsView({ isAdmin }) {
   const [invoices, setInvoices] = useState([]);
   const [summary, setSummary] = useState({ total_revenue: 0, total_pending: 0, total_refunded: 0, this_month_revenue: 0 });
@@ -36,7 +39,7 @@ export default function PaymentsView({ isAdmin }) {
     // Revenue analytics are Admin-only — the backend rejects this for a Booking Manager anyway.
     if (!isAdmin) return;
     try {
-      const res = await fetch('/api/payments/payments/summary/', { headers: authHeaders() });
+      const res = await fetch(paymentsApiUrl('/payments/payments/summary/'), { headers: authHeaders() });
       if (res.ok) {
         setSummary(await res.json());
       } else {
@@ -57,7 +60,7 @@ export default function PaymentsView({ isAdmin }) {
       if (startDate) params.set('date_from', startDate);
       if (endDate) params.set('date_to', endDate);
 
-      const res = await fetch(`/api/payments/invoices/?${params.toString()}`, { headers: authHeaders() });
+      const res = await fetch(`${paymentsApiUrl('/payments/invoices/')}?${params.toString()}`, { headers: authHeaders() });
       if (!res.ok) throw new Error('Failed to load invoices');
       const data = await res.json();
       let results = (Array.isArray(data) ? data : (data.results || []));
@@ -153,7 +156,7 @@ export default function PaymentsView({ isAdmin }) {
       const isRefund = actionType === 'REFUND';
       const isUnpaid = actionType === 'UNPAID';
       const endpoint = isRefund ? 'refund' : isUnpaid ? 'unpaid' : 'pay';
-      const url = `/api/payments/invoices/${selectedInvoice.id}/${endpoint}/`;
+      const url = paymentsApiUrl(`/payments/invoices/${selectedInvoice.id}/${endpoint}/`);
       const body = isRefund
         ? { refund_reason: refundReason }
         : isUnpaid
@@ -193,7 +196,7 @@ export default function PaymentsView({ isAdmin }) {
   const printInvoice = async () => {
     if (!invoiceToPrint) return;
     try {
-      const res = await fetch(`/api/payments/invoices/${invoiceToPrint.id}/pdf/`, { headers: authHeaders() });
+      const res = await fetch(paymentsApiUrl(`/payments/invoices/${invoiceToPrint.id}/pdf/`), { headers: authHeaders() });
       if (!res.ok) {
         toast.error('Failed to generate invoice PDF.');
         return;
