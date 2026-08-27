@@ -1,3 +1,4 @@
+import threading
 from datetime import date, time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -26,6 +27,17 @@ def make_staff(email, role="Booking Manager", password="test-pass-12345"):
     user = make_user(email, password)
     TeamRoleAssignment.objects.create(role_name=role, assigned_user=user)
     return user
+
+
+def _join_background_threads():
+    """core.alerting._send_alert now sends mail_admins() on a background
+    daemon thread (matching accounts/services.py::send_otp_email), so it no
+    longer blocks the caller. Tests that assert on mail.outbox right after
+    triggering an alert need to wait for that thread to actually finish
+    first, or they'd be racing it."""
+    for t in threading.enumerate():
+        if t is not threading.main_thread():
+            t.join(timeout=2)
 
 
 def find_event(records, event):
@@ -298,6 +310,7 @@ class SecurityAlertingTests(TestCase):
         # scope — never 'ip' — can reach FAILED_LOGIN_THRESHOLD here.
         for i in range(alerting.FAILED_LOGIN_THRESHOLD):
             alerting.alert_on_login_failure("attacker@example.com", f"10.0.0.{i}")
+        _join_background_threads()
 
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("failed logins", mail.outbox[0].subject)
@@ -306,45 +319,54 @@ class SecurityAlertingTests(TestCase):
     def test_login_failure_below_threshold_does_not_alert(self):
         for i in range(alerting.FAILED_LOGIN_THRESHOLD - 1):
             alerting.alert_on_login_failure("someone@example.com", f"10.1.0.{i}")
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 0)
 
     def test_login_failure_alert_is_deduped_within_the_window(self):
         for i in range(alerting.FAILED_LOGIN_THRESHOLD):
             alerting.alert_on_login_failure("repeat-attacker@example.com", f"10.2.0.{i}")
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
 
         # A burst reporting the same condition again must not re-alert
         # within the dedupe window — one email, not one per event.
         alerting.alert_on_login_failure("repeat-attacker@example.com", "10.2.0.99")
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
 
     def test_authorization_denied_alerts_immediately(self):
         alerting.alert_on_authorization_denied("client@example.com", "StaffViewSet", "/api/resources/staff/")
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("StaffViewSet", mail.outbox[0].subject)
 
     def test_role_change_alerts_immediately(self):
         alerting.alert_on_role_change(AuditLog.Action.ROLE_ASSIGNED, "admin@example.com", {"role_name": "Admin"})
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
 
     def test_invoice_void_or_refund_alerts_immediately(self):
         alerting.alert_on_invoice_void_or_refund(
             "refunded", "admin@example.com", "Invoice #INV-1", {"reason": "test"}
         )
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("refunded", mail.outbox[0].subject)
 
     def test_booking_cancellation_spike_alerts_only_at_threshold(self):
         for _ in range(alerting.BOOKING_CANCELLATION_THRESHOLD - 1):
             alerting.alert_on_booking_cancellation_spike()
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 0)
 
         alerting.alert_on_booking_cancellation_spike()
+        _join_background_threads()
         self.assertEqual(len(mail.outbox), 1)
 
     def test_never_raises_when_admins_unconfigured(self):
         with override_settings(ADMINS=[]):
             alerting.alert_on_role_change(AuditLog.Action.ROLE_REMOVED, "x@example.com", {})
+            _join_background_threads()
         # No assertion beyond "didn't raise" — an empty ADMINS list must
         # degrade to a silent no-op, not an error.
 

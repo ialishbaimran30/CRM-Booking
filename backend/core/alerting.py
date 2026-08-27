@@ -15,6 +15,7 @@ human only needs to be told once to go look.
 """
 
 import logging
+import threading
 
 from django.core.cache import cache
 from django.core.mail import mail_admins
@@ -32,7 +33,16 @@ BOOKING_CANCELLATION_WINDOW_SECONDS = 60 * 60
 
 def _send_alert(kind, subject, message, dedupe_key=None):
     """Never raises — an alerting failure must not break the request or
-    business action that triggered it."""
+    business action that triggered it.
+
+    The dedupe check/set stays synchronous (it must run in-order relative to
+    other callers to actually dedupe). Only the mail_admins() SMTP
+    conversation is backgrounded, on the same fire-and-forget thread pattern
+    already used for OTP email (accounts/services.py::send_otp_email) — so a
+    slow or bouncing send to the admin mailbox can no longer add latency to
+    whatever user-facing request triggered the alert. fail_silently=True is
+    kept so a failure here still only logs, never raises.
+    """
     try:
         cache_key = f"security_alert_sent_{kind}_{dedupe_key}" if dedupe_key else None
         if cache_key and cache.get(cache_key):
@@ -40,8 +50,14 @@ def _send_alert(kind, subject, message, dedupe_key=None):
         if cache_key:
             cache.set(cache_key, True, timeout=ALERT_DEDUPE_WINDOW_SECONDS)
 
-        mail_admins(subject, message, fail_silently=True)
-        logger.warning("security_alert", extra={"event": "security_alert", "kind": kind, "subject": subject})
+        def _send():
+            try:
+                mail_admins(subject, message, fail_silently=True)
+                logger.warning("security_alert", extra={"event": "security_alert", "kind": kind, "subject": subject})
+            except Exception:
+                logger.exception("Failed to send security alert kind=%s", kind)
+
+        threading.Thread(target=_send, daemon=True).start()
     except Exception:
         logger.exception("Failed to send security alert kind=%s", kind)
 

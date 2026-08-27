@@ -6,6 +6,7 @@ import threading
 import uuid
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core.validators import validate_email
 from django.db import transaction
@@ -176,24 +177,46 @@ def send_otp_email(email, code):
     threading.Thread(target=_send, daemon=True).start()
 
 
+OTP_REQUEST_LOCK_SECONDS = 5
+
+
 def request_email_otp(email):
-    """Issue a new OTP for the given email, respecting the resend cooldown."""
+    """Issue a new OTP for the given email, respecting the resend cooldown.
+
+    Guarded by a short cache-based mutex, keyed per email, before the
+    cooldown check: without it, two requests arriving within the same
+    moment (a double-clicked resend button, a retried request) can both
+    read the same "latest OTP" row before either has inserted its own, both
+    pass the cooldown check, and both send a duplicate email — a race the
+    cooldown alone doesn't close since it's a plain read-then-write with no
+    locking. The mutex only serializes concurrent callers for this one
+    email address; the 60s resend cooldown, MAX_ATTEMPTS and TTL logic
+    below are unchanged.
+    """
     email = email.strip().lower()
-    now = timezone.now()
+    lock_key = f"otp_request_lock_{email}"
+    if not cache.add(lock_key, True, timeout=OTP_REQUEST_LOCK_SECONDS):
+        # Someone else is already issuing a code for this email right now.
+        raise OtpCooldownError(OTP_REQUEST_LOCK_SECONDS)
 
-    latest = EmailOTP.objects.filter(email=email).order_by("-created_at").first()
-    if latest and not latest.is_expired():
-        elapsed = (now - latest.created_at).total_seconds()
-        if elapsed < EmailOTP.RESEND_COOLDOWN_SECONDS:
-            raise OtpCooldownError(int(EmailOTP.RESEND_COOLDOWN_SECONDS - elapsed))
+    try:
+        now = timezone.now()
 
-    # Opportunistic cleanup: bound row growth without a background job.
-    EmailOTP.objects.filter(email=email).filter(
-        Q(expires_at__lt=now) | Q(consumed_at__isnull=False)
-    ).delete()
+        latest = EmailOTP.objects.filter(email=email).order_by("-created_at").first()
+        if latest and not latest.is_expired():
+            elapsed = (now - latest.created_at).total_seconds()
+            if elapsed < EmailOTP.RESEND_COOLDOWN_SECONDS:
+                raise OtpCooldownError(int(EmailOTP.RESEND_COOLDOWN_SECONDS - elapsed))
 
-    _, raw_code = EmailOTP.generate_for_email(email)
-    send_otp_email(email, raw_code)
+        # Opportunistic cleanup: bound row growth without a background job.
+        EmailOTP.objects.filter(email=email).filter(
+            Q(expires_at__lt=now) | Q(consumed_at__isnull=False)
+        ).delete()
+
+        _, raw_code = EmailOTP.generate_for_email(email)
+        send_otp_email(email, raw_code)
+    finally:
+        cache.delete(lock_key)
 
 
 @transaction.atomic

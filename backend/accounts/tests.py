@@ -1,3 +1,4 @@
+import threading
 from io import StringIO
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from core.models import AuditLog
 from .management.commands.ensure_admin_seat import ADMIN_EMAIL
 from .models import EmailOTP, TeamRoleAssignment, TOTPDevice, User
 from .permissions import get_user_role
+from .services import OtpCooldownError, request_email_otp
 from .views import _provision_client_if_unstaffed
 
 
@@ -557,6 +559,55 @@ class OtpRequestPurposeTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class OtpRequestConcurrencyTests(TestCase):
+    """accounts.services.request_email_otp: the resend cooldown was a plain
+    read-then-write with no locking, so two requests for the same email
+    arriving at (almost) the same moment could both read the same "latest
+    OTP" row before either had inserted its own, both pass the cooldown
+    check, and both send a duplicate email. A short cache-based mutex now
+    serializes concurrent callers per email; this proves it actually closes
+    that race rather than just moving the timing window."""
+
+    def setUp(self):
+        cache.clear()
+        mail.outbox = []
+
+    def test_concurrent_requests_for_the_same_email_send_only_one_otp(self):
+        email = "burst@example.com"
+        results = []
+
+        def _fire():
+            try:
+                request_email_otp(email)
+                results.append("sent")
+            except OtpCooldownError:
+                results.append("cooldown")
+
+        threads = [threading.Thread(target=_fire) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        # Exactly one caller actually issued a code; the rest were turned
+        # away by the mutex or the pre-existing resend cooldown -- never
+        # both winning the race.
+        self.assertEqual(results.count("sent"), 1)
+        self.assertEqual(results.count("cooldown"), 7)
+        self.assertEqual(EmailOTP.objects.filter(email=email).count(), 1)
+
+    def test_sequential_requests_still_respect_the_normal_cooldown(self):
+        # The mutex is only held for the duration of one call -- it must not
+        # accidentally turn into a longer-than-60s lockout for legitimate
+        # sequential resend attempts.
+        email = "sequential@example.com"
+        request_email_otp(email)
+        with self.assertRaises(OtpCooldownError) as ctx:
+            request_email_otp(email)
+        # Still governed by the ~60s resend cooldown, not the ~5s mutex window.
+        self.assertGreater(ctx.exception.retry_after_seconds, 5)
+
+
 class LoginThrottleBypassTests(TestCase):
     """H-6: DRF's anonymous-request throttle identity (and
     core.audit.get_client_ip) must trust only settings.TRUSTED_PROXY_COUNT
@@ -611,6 +662,12 @@ class LoginThrottleBypassTests(TestCase):
                     "/api/accounts/login/", {"username": "alertvictim", "password": "wrong"}, format="json",
                     HTTP_X_FORWARDED_FOR=f"{i}.{i}.{i}.{i}, 203.0.113.{i}",
                 )
+        # core.alerting._send_alert now sends mail_admins() on a background
+        # daemon thread rather than inline, so it no longer blocks the
+        # response above -- wait for it before checking mail.outbox.
+        for t in threading.enumerate():
+            if t is not threading.main_thread():
+                t.join(timeout=2)
         self.assertTrue(any("failed logins" in m.subject for m in mail.outbox))
 
 
