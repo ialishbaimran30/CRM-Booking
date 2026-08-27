@@ -3,7 +3,7 @@ import GoogleAuthButton from './GoogleAuthButton';
 import EmailOtpForm from './EmailOtpForm';
 
 export default function AuthScreen({ onLoginSuccess }) {
-  const [mode, setMode] = useState('signin'); // 'signin' | 'signup' — cosmetic only
+  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
 
   const isSignUp = mode === 'signup';
 
@@ -28,7 +28,7 @@ export default function AuthScreen({ onLoginSuccess }) {
             <div className="flex-1 border-t border-[#d0d9e8]" />
           </div>
 
-          <EmailOtpForm onLoginSuccess={onLoginSuccess} />
+          <EmailOtpForm onLoginSuccess={onLoginSuccess} purpose={isSignUp ? 'signup' : 'login'} />
         </div>
 
         <button

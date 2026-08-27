@@ -2,6 +2,7 @@
 import logging
 
 import secrets
+import threading
 import uuid
 
 from django.conf import settings
@@ -146,13 +147,33 @@ def _otp_username(email):
 
 
 def send_otp_email(email, code):
-    """Email a freshly generated OTP code using the app's existing SMTP config."""
+    """Email a freshly generated OTP code using the app's existing SMTP config.
+
+    The code is already generated and persisted (EmailOTP.generate_for_email,
+    called just before this) before this function runs — the only thing left
+    is delivery, which was previously the single biggest contributor to
+    request latency on otp/request: a synchronous SMTP conversation with
+    Gmail (typically 1-3s, unbounded before EMAIL_TIMEOUT was added) ran
+    inline in the request/response cycle. Sent on a background thread
+    instead — matching the existing fire-and-forget pattern already used for
+    booking-confirmation email in booking/views.py — so the request returns
+    to the caller immediately once the code is safely stored, rather than
+    waiting on mail delivery. A slow/failed send no longer eats into the
+    10-minute OTP window via a stalled HTTP request.
+    """
     subject = "Your CRM & Booking verification code"
     message = (
         f"Your verification code is {code}. It expires in {EmailOTP.TTL_MINUTES} minutes. "
         "If you didn't request this, you can safely ignore this email."
     )
-    CommunicationService.send_email_notification(subject, message, email)
+
+    def _send():
+        try:
+            CommunicationService.send_email_notification(subject, message, email)
+        except Exception:
+            logger.exception("Background OTP email send failed for %s", email)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def request_email_otp(email):

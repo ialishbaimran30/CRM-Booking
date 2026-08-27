@@ -2,6 +2,7 @@ from io import StringIO
 from unittest.mock import patch
 
 import pyotp
+from django.core import mail
 from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
@@ -12,7 +13,7 @@ from clients.models import Client
 from core.models import AuditLog
 
 from .management.commands.ensure_admin_seat import ADMIN_EMAIL
-from .models import TeamRoleAssignment, TOTPDevice, User
+from .models import EmailOTP, TeamRoleAssignment, TOTPDevice, User
 from .permissions import get_user_role
 from .views import _provision_client_if_unstaffed
 
@@ -423,3 +424,53 @@ class PwnedPasswordValidatorTests(TestCase):
 
         with patch("accounts.validators.requests.get", side_effect=requests.RequestException("boom")):
             PwnedPasswordValidator().validate("any-password-at-all")  # must not raise
+
+
+class OtpRequestPurposeTests(TestCase):
+    """Login page vs Signup page (AuthScreen.js) now send a distinct
+    `purpose`, which otp/request enforces. Asserts on the EmailOTP row
+    (a synchronous DB write) rather than mail.outbox, since the actual
+    send now happens on a background thread."""
+
+    def setUp(self):
+        self.api_client = APIClient()
+
+    def test_signup_sends_an_otp_for_a_brand_new_email(self):
+        response = self.api_client.post(
+            "/api/accounts/otp/request/", {"email": "newclient@example.com", "purpose": "signup"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(EmailOTP.objects.filter(email="newclient@example.com").exists())
+
+    def test_omitting_purpose_defaults_to_signup(self):
+        response = self.api_client.post(
+            "/api/accounts/otp/request/", {"email": "nopurpose@example.com"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(EmailOTP.objects.filter(email="nopurpose@example.com").exists())
+
+    def test_login_sends_an_otp_for_an_existing_account(self):
+        User.objects.create_user(username="existing", email="existing@example.com", password="test-pass-12345")
+        response = self.api_client.post(
+            "/api/accounts/otp/request/", {"email": "existing@example.com", "purpose": "login"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(EmailOTP.objects.filter(email="existing@example.com").exists())
+
+    def test_login_rejects_an_unregistered_email_without_sending_an_otp(self):
+        mail.outbox = []
+        response = self.api_client.post(
+            "/api/accounts/otp/request/", {"email": "ghost@example.com", "purpose": "login"}, format="json"
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("No account exists", response.data["detail"])
+        self.assertFalse(EmailOTP.objects.filter(email="ghost@example.com").exists())
+        # No admin/security alert either — nothing async was ever triggered.
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_login_rejection_is_case_insensitive_on_email(self):
+        User.objects.create_user(username="mixedcase", email="MixedCase@Example.com", password="test-pass-12345")
+        response = self.api_client.post(
+            "/api/accounts/otp/request/", {"email": "mixedcase@example.com", "purpose": "login"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)

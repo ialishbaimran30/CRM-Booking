@@ -11,7 +11,7 @@ const DEFAULT_RESEND_COOLDOWN = 60;
 
 const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
-export default function EmailOtpForm({ onLoginSuccess }) {
+export default function EmailOtpForm({ onLoginSuccess, purpose = 'signup' }) {
   const [step, setStep] = useState('email'); // 'email' | 'code'
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -34,7 +34,7 @@ export default function EmailOtpForm({ onLoginSuccess }) {
     }
     setRequesting(true);
     try {
-      await axios.post(`${API_BASE_URL}/auth/otp/request/`, { email });
+      await axios.post(`${API_BASE_URL}/auth/otp/request/`, { email, purpose });
       toast.success('Verification code sent.');
       setStep('code');
       setCode('');

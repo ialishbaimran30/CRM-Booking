@@ -233,6 +233,22 @@ class EmailOTPRequestView(APIView):
         serializer = EmailOTPRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
+        purpose = serializer.validated_data["purpose"]
+
+        # Login page vs Signup page (AuthScreen.js): on Login, an email with
+        # no existing account is a normal "wrong page" outcome, not a
+        # security event — no OTP is generated/sent, and (since this never
+        # calls alert_on_login_failure) no admin alert fires. Signup keeps
+        # the original self-serve behavior: an OTP is always sent, and
+        # verify_email_otp creates the account on first successful code.
+        if purpose == "login":
+            AppUser = get_user_model()
+            if not AppUser.objects.filter(email__iexact=email).exists():
+                log_security_event("otp_request", request, outcome="no_account", extra={"email": email, "purpose": purpose})
+                return Response(
+                    {"detail": "No account exists with this email. Please register first."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         try:
             request_email_otp(email)

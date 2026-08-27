@@ -84,6 +84,12 @@ class GoogleSignInSerializer(serializers.Serializer):
 
 class EmailOTPRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    # Distinguishes the Login page from the Signup page (AuthScreen.js).
+    # Defaults to "signup" so any caller that omits it keeps today's
+    # behavior: an OTP is always sent, and the account is created on first
+    # successful verify. "login" additionally requires an existing account
+    # — see EmailOTPRequestView.
+    purpose = serializers.ChoiceField(choices=["login", "signup"], required=False, default="signup")
 
 
 class EmailOTPVerifySerializer(serializers.Serializer):
