@@ -262,6 +262,15 @@ class EmailOTPRequestView(APIView):
         email = serializer.validated_data["email"]
         purpose = serializer.validated_data["purpose"]
 
+        # Diagnostic trace point 1/4 (never logs the OTP code -- it doesn't
+        # exist yet at this point): the exact address this HTTP request
+        # asked for, straight from the validated request payload, before
+        # any other processing touches it.
+        logger.info(
+            "otp_request_received",
+            extra={"event": "otp_request_received", "email": email, "purpose": purpose},
+        )
+
         # Login page vs Signup page (AuthScreen.js): on Login, an email with
         # no existing account is a normal "wrong page" outcome, not a
         # security event — no OTP is generated/sent, and (since this never

@@ -3,6 +3,7 @@ from io import StringIO
 from unittest.mock import patch
 
 import pyotp
+from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.core import mail
 from django.core.cache import cache
@@ -651,6 +652,36 @@ class OtpEmailRecipientTests(TestCase):
         self.assertEqual(content_type, "text/html")
         self.assertIn("<html>", html_body.lower())
 
+    def test_otp_email_headers_are_deliverability_sane(self):
+        # Message-ID must be anchored to the real sending domain (gmail.com)
+        # rather than Django's default -- the local/container hostname,
+        # which is meaningless to any external mail system and is itself a
+        # low-trust signal to spam classifiers. Reply-To must be the same,
+        # real, authenticated sending address -- not absent, and not some
+        # other identity.
+        request_email_otp("headers@example.com")
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        message_id = sent.extra_headers.get("Message-ID", "")
+        self.assertTrue(message_id.endswith("@gmail.com>"), message_id)
+        self.assertEqual(sent.reply_to, [settings.EMAIL_HOST_USER])
+
+    def test_otp_email_body_identifies_the_requested_address(self):
+        # Legitimate content improvement: the message names the address it
+        # was actually sent for, in both parts -- doesn't affect the code
+        # itself, just gives the recipient (and spam classifiers) a
+        # personalization signal beyond a bare numeric code.
+        request_email_otp("personalized@example.com")
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertIn("personalized@example.com", sent.body)
+        html_body, _ = sent.alternatives[0]
+        self.assertIn("personalized@example.com", html_body)
+
     def test_otp_code_itself_is_never_logged(self):
         # Pin the generated code so we can assert its literal value never
         # appears in any log line, not just check for the phrasing around it.
@@ -662,6 +693,54 @@ class OtpEmailRecipientTests(TestCase):
         for line in captured.output:
             self.assertNotIn("123456", line)
             self.assertNotIn("verification code is", line)
+
+    @override_settings(
+        EMAIL_HOST_USER="admin@example.com",
+        DEFAULT_FROM_EMAIL="CRM & Booking <admin@example.com>",
+    )
+    def test_requested_user_email_never_lands_on_configured_admin_sender(self):
+        # Reproduces the exact reported scenario: the configured SMTP
+        # sender/admin account is admin@example.com, and a *different*
+        # address (user@example.com) requests its own OTP. The admin
+        # address must never appear as the recipient.
+        request_email_otp("user@example.com")
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.to, ["user@example.com"])
+        self.assertNotIn("admin@example.com", sent.to)
+        self.assertNotIn("admin@example.com", sent.cc)
+        self.assertNotIn("admin@example.com", sent.bcc)
+        # admin@example.com is legitimately the *sender* -- confirm that
+        # much, so this test would also catch the opposite bug (sender
+        # missing/wrong) rather than just proving a narrower claim.
+        self.assertIn("admin@example.com", sent.from_email)
+
+    @override_settings(
+        EMAIL_HOST_USER="admin@example.com",
+        DEFAULT_FROM_EMAIL="CRM & Booking <admin@example.com>",
+    )
+    def test_full_http_request_delivers_only_to_the_posted_email(self):
+        # Same proof, but through the actual API endpoint the frontend
+        # calls (serializer -> view -> request_email_otp -> send_otp_email)
+        # rather than calling the service function directly, so a bug
+        # anywhere in the HTTP-layer payload handling would show up too.
+        api_client = APIClient()
+        response = api_client.post(
+            "/api/accounts/otp/request/",
+            {"email": "user@example.com", "purpose": "signup"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.to, ["user@example.com"])
+        self.assertNotIn("admin@example.com", sent.to)
+        self.assertNotIn("admin@example.com", sent.cc)
+        self.assertNotIn("admin@example.com", sent.bcc)
 
 
 class LoginThrottleBypassTests(TestCase):

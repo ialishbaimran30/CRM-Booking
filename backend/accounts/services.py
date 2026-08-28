@@ -5,6 +5,7 @@ import secrets
 import threading
 import time
 import uuid
+from email.utils import make_msgid
 
 from django.conf import settings
 from django.core.cache import cache
@@ -183,7 +184,7 @@ def send_otp_email(email, code, otp_id=None):
     it from us vs. slow to hand it to the recipient afterwards), but a long
     duration here would point at the former.
     """
-    context = {"code": code, "ttl_minutes": EmailOTP.TTL_MINUTES}
+    context = {"code": code, "ttl_minutes": EmailOTP.TTL_MINUTES, "email": email}
     subject = "Your CRM & Booking verification code"
     text_body = render_to_string("emails/otp_code.txt", context)
     html_body = render_to_string("emails/otp_code.html", context)
@@ -209,13 +210,49 @@ def send_otp_email(email, code, otp_id=None):
             # to=[email] only -- the requesting user's own address is the
             # sole recipient; no cc/bcc is ever set, so settings.ADMINS
             # (the security-alert mailbox) can never receive an OTP.
+            #
+            # reply_to=[EMAIL_HOST_USER]: same real, authenticated sending
+            # address as From -- not a new identity, just an explicit,
+            # transparent, monitored reply address instead of none at all
+            # (a real Reply-To is a minor, legitimate deliverability signal;
+            # this does not disguise or change who the sender is).
+            #
+            # headers={"Message-ID": ...}: Django's own default builds the
+            # Message-ID's domain from the server's local hostname
+            # (socket.getfqdn()) -- on a container host that's a meaningless,
+            # non-resolvable string (verified locally: "LAPTOP-HDV357JO"),
+            # which is itself a low-trust signal to spam classifiers. Using
+            # the real sending domain (gmail.com) instead is honest -- that
+            # literally is where this mail originates -- and removes that
+            # specific red flag.
+            reply_to = [settings.EMAIL_HOST_USER] if settings.EMAIL_HOST_USER else None
             message = EmailMultiAlternatives(
                 subject=subject,
                 body=text_body,
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to=[email],
+                reply_to=reply_to,
+                headers={"Message-ID": make_msgid(domain="gmail.com")},
             )
             message.attach_alternative(html_body, "text/html")
+            # Diagnostic trace point: the literal to/cc/bcc about to be
+            # handed to the SMTP backend, read back off the constructed
+            # message object itself (not the `email` variable) so this
+            # would catch a bug even if something above mutated `to` in a
+            # way this code doesn't otherwise account for.
+            logger.info(
+                "otp_email_recipient_resolved",
+                extra={
+                    "event": "otp_email_recipient_resolved",
+                    "otp_id": otp_id,
+                    "to": message.to,
+                    "cc": message.cc,
+                    "bcc": message.bcc,
+                    "from_email": message.from_email,
+                    "reply_to": message.reply_to,
+                    "message_id": message.extra_headers.get("Message-ID"),
+                },
+            )
             message.send(fail_silently=False)
         except Exception:
             # Must never be silently swallowed: this is the only place a
