@@ -1,0 +1,9 @@
+Your CRM & Booking verification code
+
+Your verification code is: {{ code }}
+
+This code expires in {{ ttl_minutes }} minutes. Use it only on the CRM & Booking sign-in page — we will never ask you to share it with anyone.
+
+If you didn't request this, you can safely ignore this email.
+
+— CRM & Booking Team

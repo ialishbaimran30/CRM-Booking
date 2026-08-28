@@ -3,21 +3,22 @@ import logging
 
 import secrets
 import threading
+import time
 import uuid
 
 from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
+from django.core.mail import EmailMultiAlternatives
 from django.core.validators import validate_email
 from django.db import transaction
 from django.db.models import Q
+from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.text import slugify
 from google.auth import exceptions as google_exceptions
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
-
-from notifications.services import CommunicationService
 
 from .models import EmailOTP, User
 
@@ -147,7 +148,7 @@ def _otp_username(email):
     return f"{base}-{uuid.uuid4().hex[:12]}"[:150]
 
 
-def send_otp_email(email, code):
+def send_otp_email(email, code, otp_id=None):
     """Email a freshly generated OTP code using the app's existing SMTP config.
 
     The code is already generated and persisted (EmailOTP.generate_for_email,
@@ -161,18 +162,83 @@ def send_otp_email(email, code):
     to the caller immediately once the code is safely stored, rather than
     waiting on mail delivery. A slow/failed send no longer eats into the
     10-minute OTP window via a stalled HTTP request.
+
+    Sent directly via EmailMultiAlternatives (plain text + HTML), the same
+    pattern already used for every other transactional email in this app
+    (see booking/emails.py), instead of the old bare single-part
+    `send_mail` used before — Gmail's abuse heuristics treat a well-formed
+    multipart message from an established pattern with more trust than a
+    single-part, single-line, numeric-code-only message, which is a known
+    contributor to the 550 5.7.1 "likely unsolicited" bounce this replaces.
+    `to=[email]` only — no cc/bcc, ever: the requesting user's own address
+    is the sole recipient, and the admin/security-alert mailbox (settings
+    .ADMINS) is never added here.
+
+    Diagnostic timing (never logs the code/template body itself): logs task
+    start, SMTP send start, and send completion/failure with an elapsed
+    duration, using time.monotonic() so the measurement can't be skewed by
+    clock adjustments. `otp_id`/`email` are included only to correlate the
+    handful of log lines for one OTP request — this can't observe anything
+    past Gmail accepting the message (i.e. whether Gmail was slow to accept
+    it from us vs. slow to hand it to the recipient afterwards), but a long
+    duration here would point at the former.
     """
+    context = {"code": code, "ttl_minutes": EmailOTP.TTL_MINUTES}
     subject = "Your CRM & Booking verification code"
-    message = (
-        f"Your verification code is {code}. It expires in {EmailOTP.TTL_MINUTES} minutes. "
-        "If you didn't request this, you can safely ignore this email."
-    )
+    text_body = render_to_string("emails/otp_code.txt", context)
+    html_body = render_to_string("emails/otp_code.html", context)
 
     def _send():
+        task_started_at = time.monotonic()
+        logger.info(
+            "otp_email_task_started",
+            extra={"event": "otp_email_task_started", "otp_id": otp_id, "email": email},
+        )
+
+        send_started_at = time.monotonic()
+        logger.info(
+            "otp_email_smtp_send_started",
+            extra={
+                "event": "otp_email_smtp_send_started",
+                "otp_id": otp_id,
+                "email": email,
+                "queue_delay_ms": round((send_started_at - task_started_at) * 1000, 1),
+            },
+        )
         try:
-            CommunicationService.send_email_notification(subject, message, email)
+            # to=[email] only -- the requesting user's own address is the
+            # sole recipient; no cc/bcc is ever set, so settings.ADMINS
+            # (the security-alert mailbox) can never receive an OTP.
+            message = EmailMultiAlternatives(
+                subject=subject,
+                body=text_body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[email],
+            )
+            message.attach_alternative(html_body, "text/html")
+            message.send(fail_silently=False)
         except Exception:
-            logger.exception("Background OTP email send failed for %s", email)
+            # Must never be silently swallowed: this is the only place a
+            # real SMTP failure for an OTP send can be observed and logged.
+            logger.exception(
+                "otp_email_smtp_send_failed",
+                extra={
+                    "event": "otp_email_smtp_send_failed",
+                    "otp_id": otp_id,
+                    "email": email,
+                    "duration_ms": round((time.monotonic() - send_started_at) * 1000, 1),
+                },
+            )
+        else:
+            logger.info(
+                "otp_email_smtp_send_completed",
+                extra={
+                    "event": "otp_email_smtp_send_completed",
+                    "otp_id": otp_id,
+                    "email": email,
+                    "duration_ms": round((time.monotonic() - send_started_at) * 1000, 1),
+                },
+            )
 
     threading.Thread(target=_send, daemon=True).start()
 
@@ -213,8 +279,17 @@ def request_email_otp(email):
             Q(expires_at__lt=now) | Q(consumed_at__isnull=False)
         ).delete()
 
-        _, raw_code = EmailOTP.generate_for_email(email)
-        send_otp_email(email, raw_code)
+        otp_instance, raw_code = EmailOTP.generate_for_email(email)
+        logger.info(
+            "otp_created",
+            extra={
+                "event": "otp_created",
+                "otp_id": otp_instance.id,
+                "email": email,
+                "created_at": otp_instance.created_at.isoformat(),
+            },
+        )
+        send_otp_email(email, raw_code, otp_id=otp_instance.id)
     finally:
         cache.delete(lock_key)
 

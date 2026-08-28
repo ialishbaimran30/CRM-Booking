@@ -608,6 +608,62 @@ class OtpRequestConcurrencyTests(TestCase):
         self.assertGreater(ctx.exception.retry_after_seconds, 5)
 
 
+@override_settings(ADMINS=[("Security Alert Recipient 1", "secalerts@example.com")])
+class OtpEmailRecipientTests(TestCase):
+    """accounts.services.send_otp_email: the requesting user's own email
+    must be the sole recipient -- the admin/security-alert mailbox
+    (settings.ADMINS) must never receive, be cc'd, or be bcc'd on an OTP,
+    and the message must be a well-formed multipart (text + HTML) email."""
+
+    def setUp(self):
+        cache.clear()
+        mail.outbox = []
+
+    def _join_background_threads(self):
+        for t in threading.enumerate():
+            if t is not threading.main_thread():
+                t.join(timeout=5)
+
+    def test_otp_email_is_sent_only_to_the_requesting_user(self):
+        request_email_otp("recipient@example.com")
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.to, ["recipient@example.com"])
+        self.assertEqual(sent.cc, [])
+        self.assertEqual(sent.bcc, [])
+        # The admin/security-alert address must never appear anywhere on
+        # the message, under any header.
+        self.assertNotIn("secalerts@example.com", sent.to)
+        self.assertNotIn("secalerts@example.com", sent.cc)
+        self.assertNotIn("secalerts@example.com", sent.bcc)
+
+    def test_otp_email_is_multipart_text_and_html(self):
+        request_email_otp("multipart@example.com")
+        self._join_background_threads()
+
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertTrue(sent.body.strip())  # plain-text part
+        self.assertEqual(len(sent.alternatives), 1)
+        html_body, content_type = sent.alternatives[0]
+        self.assertEqual(content_type, "text/html")
+        self.assertIn("<html>", html_body.lower())
+
+    def test_otp_code_itself_is_never_logged(self):
+        # Pin the generated code so we can assert its literal value never
+        # appears in any log line, not just check for the phrasing around it.
+        with patch("accounts.models.secrets.randbelow", return_value=123456):
+            with self.assertLogs("accounts.services", level="INFO") as captured:
+                request_email_otp("nolog@example.com")
+                self._join_background_threads()
+
+        for line in captured.output:
+            self.assertNotIn("123456", line)
+            self.assertNotIn("verification code is", line)
+
+
 class LoginThrottleBypassTests(TestCase):
     """H-6: DRF's anonymous-request throttle identity (and
     core.audit.get_client_ip) must trust only settings.TRUSTED_PROXY_COUNT
