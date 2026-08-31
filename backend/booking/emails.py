@@ -1,11 +1,100 @@
 import logging
+from datetime import datetime, timezone as dt_timezone
+from email.utils import parseaddr
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _ics_escape(value):
+    """Escape a value for an iCalendar TEXT field (RFC 5545 §3.3.11)."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _fold_ics_line(line):
+    """RFC 5545 §3.1: content lines longer than 75 octets are folded with
+    CRLF followed by a single space, without splitting a multi-byte char."""
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+    pieces = []
+    while len(raw) > 75:
+        cut = 75
+        while cut > 0 and (raw[cut] & 0xC0) == 0x80:  # don't split a UTF-8 sequence
+            cut -= 1
+        pieces.append(raw[:cut].decode("utf-8"))
+        raw = b" " + raw[cut:]
+    pieces.append(raw.decode("utf-8"))
+    return "\r\n".join(pieces)
+
+
+def build_booking_calendar_invite(booking):
+    """Return a METHOD:REQUEST iCalendar object for this booking so the
+    confirmation email renders as a meeting invitation (Yes / No / Maybe) in
+    Gmail and adds the event to the client's calendar on accept.
+
+    This is independent of the Google Calendar API sync in
+    booking/google_calendar.py: that path emails its own invite from the
+    connected Google account only when Calendar is connected, whereas this
+    one always travels with the confirmation email over the normal SMTP
+    backend. Booking times are wall-clock in settings.TIME_ZONE (same as
+    google_calendar._event_payload), converted here to UTC.
+    """
+    client = booking.client
+    tz = timezone.get_default_timezone()
+
+    def _utc(t):
+        return timezone.make_aware(
+            datetime.combine(booking.booking_date, t), tz
+        ).astimezone(dt_timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    organizer_name, organizer_email = parseaddr(settings.DEFAULT_FROM_EMAIL)
+    organizer_name = organizer_name or "CRM & Booking"
+    domain = (organizer_email.split("@")[-1] if "@" in organizer_email else "") or "crm-booking"
+
+    description = (
+        f"Service: {booking.service_name}\n"
+        f"Client: {client.full_name} ({client.email})\n"
+        f"Booking ID: {booking.id}"
+    )
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "PRODID:-//CRM & Booking//Booking Confirmation//EN",
+        "VERSION:2.0",
+        "CALSCALE:GREGORIAN",
+        "METHOD:REQUEST",
+        "BEGIN:VEVENT",
+        f"UID:booking-{booking.pk}@{domain}",
+        f"DTSTAMP:{datetime.now(dt_timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTART:{_utc(booking.start_time)}",
+        f"DTEND:{_utc(booking.end_time)}",
+        f"SUMMARY:{_ics_escape(booking.service_name)} - {_ics_escape(client.full_name)}",
+        f"DESCRIPTION:{_ics_escape(description)}",
+        f"ORGANIZER;CN={_ics_escape(organizer_name)}:mailto:{organizer_email}",
+        (
+            f"ATTENDEE;CN={_ics_escape(client.full_name)};ROLE=REQ-PARTICIPANT;"
+            f"PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{client.email}"
+        ),
+        "STATUS:CONFIRMED",
+        "SEQUENCE:0",
+        "TRANSP:OPAQUE",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(_fold_ics_line(line) for line in lines) + "\r\n"
 
 
 def send_booking_confirmation_email(booking):
@@ -40,6 +129,23 @@ def send_booking_confirmation_email(booking):
             to=[client.email],
         )
         email.attach_alternative(html_body, "text/html")
+
+        # Attach the meeting invite so Gmail shows the Yes / No / Maybe
+        # buttons and the client can add it to their own calendar. Built
+        # in a nested try so an invite-generation problem can never stop
+        # the confirmation email itself from going out.
+        try:
+            ics = build_booking_calendar_invite(booking)
+            # multipart/alternative part -> Gmail's inline RSVP widget.
+            email.attach_alternative(ics, 'text/calendar; method=REQUEST; charset="UTF-8"')
+            # file part -> Outlook / Apple Mail / download.
+            email.attach("invite.ics", ics, 'text/calendar; method=REQUEST')
+        except Exception:
+            logger.exception(
+                "Failed to build calendar invite for booking %s; "
+                "sending confirmation without it", booking.id
+            )
+
         email.send(fail_silently=False)
         return True
     except Exception:
