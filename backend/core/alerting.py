@@ -40,8 +40,9 @@ def _send_alert(kind, subject, message, dedupe_key=None):
     conversation is backgrounded, on the same fire-and-forget thread pattern
     already used for OTP email (accounts/services.py::send_otp_email) — so a
     slow or bouncing send to the admin mailbox can no longer add latency to
-    whatever user-facing request triggered the alert. fail_silently=True is
-    kept so a failure here still only logs, never raises.
+    whatever user-facing request triggered the alert. A failure here still
+    only logs, never raises (the send runs in a try/except on that daemon
+    thread).
     """
     try:
         cache_key = f"security_alert_sent_{kind}_{dedupe_key}" if dedupe_key else None
@@ -52,7 +53,13 @@ def _send_alert(kind, subject, message, dedupe_key=None):
 
         def _send():
             try:
-                mail_admins(subject, message, fail_silently=True)
+                # fail_silently=False so a rejected send (e.g. Brevo 535 bad
+                # SMTP key / 550 unverified SERVER_EMAIL sender) raises here
+                # and is logged with its full traceback below, instead of
+                # vanishing. Still never propagates: this whole body runs on
+                # a daemon thread inside try/except, so the triggering
+                # request is unaffected either way.
+                mail_admins(subject, message, fail_silently=False)
                 logger.warning("security_alert", extra={"event": "security_alert", "kind": kind, "subject": subject})
             except Exception:
                 logger.exception("Failed to send security alert kind=%s", kind)

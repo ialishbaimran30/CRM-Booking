@@ -1,6 +1,10 @@
+import logging
+
 from django.core.mail import send_mail
 from django.conf import settings
 from .models import Notification
+
+logger = logging.getLogger(__name__)
 
 
 class CommunicationService:
@@ -88,8 +92,13 @@ class CommunicationService:
                 recipient_list=[recipient_email],
                 fail_silently=False,
             )
-        except Exception as e:
-            print(f"Email sending failed: {e}")
+        except Exception:
+            # e.g. Brevo returning 535 (bad SMTP key) / 550 (unverified
+            # sender) — log the full SMTP response + traceback so a broken
+            # mail config is visible, not swallowed to stdout.
+            logger.exception(
+                "Email notification to %s failed to send via SMTP", recipient_email
+            )
 
     @staticmethod
     def send_mock_sms(phone_number, message):

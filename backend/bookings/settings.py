@@ -276,7 +276,11 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"CRM & Booking <{EMAIL_HOS
 # relay login, not a real mailbox, so reply-to falls back to the verified
 # From address rather than EMAIL_HOST_USER.
 EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", DEFAULT_FROM_EMAIL)
-SERVER_EMAIL = DEFAULT_FROM_EMAIL  # From address Django uses for mail_admins (core/alerting.py, F-9)
+# From address for CRM-admin / security-alert mail (mail_admins, core/alerting.py,
+# F-9). Kept a separate setting from DEFAULT_FROM_EMAIL so operational alerts can
+# come from a distinct verified Brevo sender; defaults to DEFAULT_FROM_EMAIL when
+# unset. Must also be a sender verified in the Brevo account.
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
 
 # Real, owned destination for security alerts (SecurityFeatures.md F-9) —
 # core/alerting.py routes rate-based and one-off security conditions here
