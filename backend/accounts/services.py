@@ -2,6 +2,8 @@
 import logging
 
 import secrets
+import smtplib
+import socket
 import threading
 import time
 import uuid
@@ -149,135 +151,178 @@ def _otp_username(email):
     return f"{base}-{uuid.uuid4().hex[:12]}"[:150]
 
 
-def send_otp_email(email, code, otp_id=None):
-    """Email a freshly generated OTP code using the app's existing SMTP config.
+# One background retry for a transient, connection-level SMTP failure. This
+# runs entirely inside the email worker thread -- NEVER in the
+# request/response cycle -- so it can never slow the OTP API response. Kept
+# to a single retry with a short fixed delay: enough to ride out a dropped
+# or refused connection, not so much that a hard outage leaves a thread
+# stuck for minutes.
+OTP_EMAIL_MAX_ATTEMPTS = 2
+OTP_EMAIL_RETRY_DELAY_SECONDS = 2
 
-    The code is already generated and persisted (EmailOTP.generate_for_email,
-    called just before this) before this function runs — the only thing left
-    is delivery, which was previously the single biggest contributor to
-    request latency on otp/request: a synchronous SMTP conversation with
-    Gmail (typically 1-3s, unbounded before EMAIL_TIMEOUT was added) ran
-    inline in the request/response cycle. Sent on a background thread
-    instead — matching the existing fire-and-forget pattern already used for
-    booking-confirmation email in booking/views.py — so the request returns
-    to the caller immediately once the code is safely stored, rather than
-    waiting on mail delivery. A slow/failed send no longer eats into the
-    10-minute OTP window via a stalled HTTP request.
+# Only connection-level failures that occur *before* the message body is
+# handed to the server are retried -- retrying these cannot deliver a
+# second copy of the code. Deliberately NOT a broad `OSError` /
+# `smtplib.SMTPException`: those are base classes of the permanent,
+# post-DATA failures (SMTPRecipientsRefused, SMTPSenderRefused,
+# SMTPAuthenticationError, SMTPDataError, ...), which must fall through to
+# the catch-all below and be logged once, never retried.
+_RETRYABLE_SMTP_ERRORS = (
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+    smtplib.SMTPHeloError,
+    ConnectionError,   # reset / refused / broken pipe
+    TimeoutError,      # socket timeout (also socket.timeout on 3.10+)
+    socket.gaierror,   # DNS resolution failure
+)
 
-    Sent directly via EmailMultiAlternatives (plain text + HTML), the same
-    pattern already used for every other transactional email in this app
-    (see booking/emails.py), instead of the old bare single-part
-    `send_mail` used before — Gmail's abuse heuristics treat a well-formed
-    multipart message from an established pattern with more trust than a
-    single-part, single-line, numeric-code-only message, which is a known
-    contributor to the 550 5.7.1 "likely unsolicited" bounce this replaces.
-    `to=[email]` only — no cc/bcc, ever: the requesting user's own address
-    is the sole recipient, and the admin/security-alert mailbox (settings
-    .ADMINS) is never added here.
 
-    Diagnostic timing (never logs the code/template body itself): logs task
-    start, SMTP send start, and send completion/failure with an elapsed
-    duration, using time.monotonic() so the measurement can't be skewed by
-    clock adjustments. `otp_id`/`email` are included only to correlate the
-    handful of log lines for one OTP request — this can't observe anything
-    past Gmail accepting the message (i.e. whether Gmail was slow to accept
-    it from us vs. slow to hand it to the recipient afterwards), but a long
-    duration here would point at the former.
+def _build_otp_message(email, code):
+    """Render the templates and assemble the OTP email object.
+
+    Pure CPU / template work with no network I/O. Called from the
+    background worker thread (not the request thread) so template loading
+    and parsing never touch the OTP API response path, and a template
+    error can never turn an OTP request into a 500.
+
+    `to=[email]` only -- the requesting user's own address is the sole
+    recipient; no cc/bcc is ever set, so settings.ADMINS (the
+    security-alert mailbox) can never receive an OTP.
+
+    `reply_to=[EMAIL_HOST_USER]`: the same real, authenticated sending
+    address as From -- an explicit, monitored reply address rather than
+    none at all (a minor, legitimate deliverability signal; it does not
+    disguise or change who the sender is).
+
+    `headers={"Message-ID": ...}` anchored to the real sending domain
+    (gmail.com) instead of Django's default, which builds it from the
+    local/container hostname -- a meaningless, non-resolvable string that
+    is itself a low-trust signal to spam classifiers.
     """
     context = {"code": code, "ttl_minutes": EmailOTP.TTL_MINUTES, "email": email}
-    subject = "Your CRM & Booking verification code"
-    text_body = render_to_string("emails/otp_code.txt", context)
-    html_body = render_to_string("emails/otp_code.html", context)
+    reply_to = [settings.EMAIL_HOST_USER] if settings.EMAIL_HOST_USER else None
+    message = EmailMultiAlternatives(
+        subject="Your CRM & Booking verification code",
+        body=render_to_string("emails/otp_code.txt", context),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[email],
+        reply_to=reply_to,
+        headers={"Message-ID": make_msgid(domain="gmail.com")},
+    )
+    message.attach_alternative(render_to_string("emails/otp_code.html", context), "text/html")
+    return message
+
+
+def send_otp_email(email, code, otp_id=None, created_monotonic=None):
+    """Deliver a freshly generated + persisted OTP code on a background
+    thread, returning immediately so the request that triggered it never
+    waits on SMTP.
+
+    The code is already generated and persisted synchronously
+    (EmailOTP.generate_for_email) before this is called -- the only thing
+    left is delivery. Everything expensive (template rendering + the SMTP
+    conversation with Gmail, typically 0.3-2s) happens on the worker
+    thread; the request thread only spawns it. A slow or failing send can
+    no longer eat into the 10-minute OTP window via a stalled HTTP request.
+
+    Diagnostic timeline (INFO, structured, and it NEVER logs the code or
+    the rendered body). All timings use time.monotonic() and, when
+    `created_monotonic` is supplied by the caller, are anchored to the
+    moment the OTP row was created so the whole path is measurable from
+    one place:
+
+        otp_created            (request thread, request_email_otp)
+          -> email_task_queued   (request thread, here, just before .start())
+          -> email_task_started  (worker thread, first line -- schedule_latency_ms
+                                  is the OS/GIL hand-off delay, previously blind)
+          -> smtp_send_started   (worker thread, per attempt)
+          -> smtp_send_completed (worker thread -- since_otp_created_ms is the
+                                  total application-side time to Gmail acceptance)
+
+    Reading the gaps between these tells you exactly where a slow OTP is
+    spent: task queue / worker scheduling / SMTP connection / provider.
+    (This still cannot observe anything past Gmail *accepting* the
+    message -- recipient-side delivery latency is not visible from here.)
+    """
+    queued_at = time.monotonic()
+    origin = created_monotonic if created_monotonic is not None else queued_at
+
+    def _log(event, level=logging.INFO, **fields):
+        logger.log(level, event, extra={"event": event, "otp_id": otp_id, "email": email, **fields})
 
     def _send():
-        task_started_at = time.monotonic()
-        logger.info(
-            "otp_email_task_started",
-            extra={"event": "otp_email_task_started", "otp_id": otp_id, "email": email},
-        )
-
-        send_started_at = time.monotonic()
-        logger.info(
-            "otp_email_smtp_send_started",
-            extra={
-                "event": "otp_email_smtp_send_started",
-                "otp_id": otp_id,
-                "email": email,
-                "queue_delay_ms": round((send_started_at - task_started_at) * 1000, 1),
-            },
-        )
         try:
-            # to=[email] only -- the requesting user's own address is the
-            # sole recipient; no cc/bcc is ever set, so settings.ADMINS
-            # (the security-alert mailbox) can never receive an OTP.
-            #
-            # reply_to=[EMAIL_HOST_USER]: same real, authenticated sending
-            # address as From -- not a new identity, just an explicit,
-            # transparent, monitored reply address instead of none at all
-            # (a real Reply-To is a minor, legitimate deliverability signal;
-            # this does not disguise or change who the sender is).
-            #
-            # headers={"Message-ID": ...}: Django's own default builds the
-            # Message-ID's domain from the server's local hostname
-            # (socket.getfqdn()) -- on a container host that's a meaningless,
-            # non-resolvable string (verified locally: "LAPTOP-HDV357JO"),
-            # which is itself a low-trust signal to spam classifiers. Using
-            # the real sending domain (gmail.com) instead is honest -- that
-            # literally is where this mail originates -- and removes that
-            # specific red flag.
-            reply_to = [settings.EMAIL_HOST_USER] if settings.EMAIL_HOST_USER else None
-            message = EmailMultiAlternatives(
-                subject=subject,
-                body=text_body,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=[email],
-                reply_to=reply_to,
-                headers={"Message-ID": make_msgid(domain="gmail.com")},
-            )
-            message.attach_alternative(html_body, "text/html")
-            # Diagnostic trace point: the literal to/cc/bcc about to be
-            # handed to the SMTP backend, read back off the constructed
-            # message object itself (not the `email` variable) so this
-            # would catch a bug even if something above mutated `to` in a
-            # way this code doesn't otherwise account for.
-            logger.info(
-                "otp_email_recipient_resolved",
-                extra={
-                    "event": "otp_email_recipient_resolved",
-                    "otp_id": otp_id,
-                    "to": message.to,
-                    "cc": message.cc,
-                    "bcc": message.bcc,
-                    "from_email": message.from_email,
-                    "reply_to": message.reply_to,
-                    "message_id": message.extra_headers.get("Message-ID"),
-                },
-            )
-            message.send(fail_silently=False)
-        except Exception:
-            # Must never be silently swallowed: this is the only place a
-            # real SMTP failure for an OTP send can be observed and logged.
-            logger.exception(
-                "otp_email_smtp_send_failed",
-                extra={
-                    "event": "otp_email_smtp_send_failed",
-                    "otp_id": otp_id,
-                    "email": email,
-                    "duration_ms": round((time.monotonic() - send_started_at) * 1000, 1),
-                },
-            )
-        else:
-            logger.info(
-                "otp_email_smtp_send_completed",
-                extra={
-                    "event": "otp_email_smtp_send_completed",
-                    "otp_id": otp_id,
-                    "email": email,
-                    "duration_ms": round((time.monotonic() - send_started_at) * 1000, 1),
-                },
+            started_at = time.monotonic()
+            _log(
+                "email_task_started",
+                # The OS/GIL delay between the request thread queuing this
+                # and the worker actually running -- the one segment that
+                # used to be unmeasured. A consistently large value here
+                # (vs. a large smtp_send_* duration) points at worker
+                # scheduling under load, not the mail provider.
+                schedule_latency_ms=round((started_at - queued_at) * 1000, 1),
+                since_otp_created_ms=round((started_at - origin) * 1000, 1),
             )
 
-    threading.Thread(target=_send, daemon=True).start()
+            message = _build_otp_message(email, code)
+            # The literal to/cc/bcc about to be handed to the SMTP backend,
+            # read back off the constructed message object itself, so this
+            # trace would still catch a recipient bug even if something
+            # upstream mutated `to`.
+            _log(
+                "otp_email_recipient_resolved",
+                to=message.to, cc=message.cc, bcc=message.bcc,
+                from_email=message.from_email, reply_to=message.reply_to,
+                message_id=message.extra_headers.get("Message-ID"),
+            )
+
+            for attempt in range(1, OTP_EMAIL_MAX_ATTEMPTS + 1):
+                send_started_at = time.monotonic()
+                _log(
+                    "smtp_send_started",
+                    attempt=attempt,
+                    since_otp_created_ms=round((send_started_at - origin) * 1000, 1),
+                )
+                try:
+                    message.send(fail_silently=False)
+                except _RETRYABLE_SMTP_ERRORS as exc:
+                    is_last = attempt >= OTP_EMAIL_MAX_ATTEMPTS
+                    _log(
+                        "smtp_send_failed" if is_last else "smtp_send_retry",
+                        level=logging.ERROR if is_last else logging.WARNING,
+                        attempt=attempt,
+                        error=exc.__class__.__name__,
+                        duration_ms=round((time.monotonic() - send_started_at) * 1000, 1),
+                    )
+                    if is_last:
+                        return
+                    # New Message-ID for the retried copy (RFC-correct for
+                    # a resend, and avoids provider-side dedup dropping it).
+                    message = _build_otp_message(email, code)
+                    time.sleep(OTP_EMAIL_RETRY_DELAY_SECONDS)
+                    continue
+                _log(
+                    "smtp_send_completed",
+                    attempt=attempt,
+                    duration_ms=round((time.monotonic() - send_started_at) * 1000, 1),
+                    since_otp_created_ms=round((time.monotonic() - origin) * 1000, 1),
+                )
+                return
+        except Exception:
+            # A non-retryable SMTP error, a template error, or anything
+            # unexpected: log it (never swallow silently) and let the
+            # thread exit cleanly. The OTP row is untouched and still
+            # valid -- the user can request a resend.
+            logger.exception(
+                "smtp_send_failed",
+                extra={"event": "smtp_send_failed", "otp_id": otp_id, "email": email},
+            )
+
+    _log(
+        "email_task_queued",
+        since_otp_created_ms=round((queued_at - origin) * 1000, 1),
+    )
+    threading.Thread(target=_send, name=f"otp-email-{otp_id or 'x'}", daemon=True).start()
 
 
 OTP_REQUEST_LOCK_SECONDS = 5
@@ -311,12 +356,8 @@ def request_email_otp(email):
             if elapsed < EmailOTP.RESEND_COOLDOWN_SECONDS:
                 raise OtpCooldownError(int(EmailOTP.RESEND_COOLDOWN_SECONDS - elapsed))
 
-        # Opportunistic cleanup: bound row growth without a background job.
-        EmailOTP.objects.filter(email=email).filter(
-            Q(expires_at__lt=now) | Q(consumed_at__isnull=False)
-        ).delete()
-
         otp_instance, raw_code = EmailOTP.generate_for_email(email)
+        created_monotonic = time.monotonic()
         logger.info(
             "otp_created",
             extra={
@@ -326,7 +367,18 @@ def request_email_otp(email):
                 "created_at": otp_instance.created_at.isoformat(),
             },
         )
-        send_otp_email(email, raw_code, otp_id=otp_instance.id)
+        # Hand off to the background email worker the instant the code is
+        # safely persisted -- nothing (not even the cleanup DELETE below)
+        # sits between "OTP saved" and "email queued".
+        send_otp_email(email, raw_code, otp_id=otp_instance.id, created_monotonic=created_monotonic)
+
+        # Opportunistic cleanup: bound row growth without a background job.
+        # Runs after the email hand-off -- it is best-effort housekeeping
+        # and must never delay delivery of the code we just issued. (The
+        # row just created is never matched: it is unexpired and unconsumed.)
+        EmailOTP.objects.filter(email=email).filter(
+            Q(expires_at__lt=now) | Q(consumed_at__isnull=False)
+        ).delete()
     finally:
         cache.delete(lock_key)
 
