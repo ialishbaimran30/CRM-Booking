@@ -1,4 +1,5 @@
 from rest_framework import viewsets, filters, status
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -381,6 +382,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {"non_field_errors": ["This slot has already been booked by another client. Please choose another slot."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except APIException:
+            # DRF validation/permission errors already carry a clean,
+            # field-keyed body and the right status — let DRF render them
+            # rather than stringifying them into {"error": "<repr>"} below.
+            raise
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -392,6 +398,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {"non_field_errors": ["This slot has already been booked by another client. Please choose another slot."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except APIException:
+            raise
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

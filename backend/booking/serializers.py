@@ -96,9 +96,14 @@ class BookingSerializer(serializers.ModelSerializer):
             if not self.instance:
                 # Clients never choose the initial status; the model default (PENDING) applies.
                 raise serializers.ValidationError("You cannot set a booking's status.")
-            if value != Booking.BookingStatus.CANCELLED:
+            current = self.instance.status
+            # The edit form always echoes the booking's current status back,
+            # so a client changing only the time/notes re-submits it unchanged
+            # — that must not count as a status change. The only status change
+            # a client may make is a cancellation.
+            if value != current and value != Booking.BookingStatus.CANCELLED:
                 raise serializers.ValidationError("You can only cancel your own booking.")
-            if self.instance.status == Booking.BookingStatus.CANCELLED:
+            if value == Booking.BookingStatus.CANCELLED and current == Booking.BookingStatus.CANCELLED:
                 raise serializers.ValidationError("This booking is already cancelled.")
         return value
 
@@ -199,6 +204,24 @@ class BookingSerializer(serializers.ModelSerializer):
 
         # If the booking client had asked to be notified for this exact slot,
         # they've now claimed it — drop their waitlist entry for it.
+        Waitlist.objects.filter(
+            client=booking.client,
+            booking_date=booking.booking_date,
+            start_time=booking.start_time,
+            end_time=booking.end_time,
+        ).delete()
+
+        return booking
+
+    def update(self, instance, validated_data):
+        booking = super().update(instance, validated_data)
+
+        # Same cleanup as create(): the booking now occupies this exact slot,
+        # so if its client was on the waitlist for it (e.g. they rescheduled
+        # into a slot that just freed up), that request is now fulfilled —
+        # drop the stale entry. Runs inside BookingViewSet.perform_update's
+        # transaction.atomic() block, so the booking move and the waitlist
+        # removal commit together or not at all.
         Waitlist.objects.filter(
             client=booking.client,
             booking_date=booking.booking_date,
