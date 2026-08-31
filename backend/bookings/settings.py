@@ -257,16 +257,25 @@ CSRF_COOKIE_SECURE = not DEBUG
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
+# SMTP transport — Brevo (smtp-relay.brevo.com:587, STARTTLS). All three are
+# env-driven so a deployment (Azure App Service) overrides them without a
+# code change; the defaults match the Brevo relay used in local dev.
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp-relay.brevo.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
 # Django's own default is None (no timeout) — an unresponsive/slow SMTP
-# handshake with Gmail could otherwise block a request indefinitely. Bounds
-# every outgoing email (OTP included) to a sane worst case instead.
+# handshake could otherwise block a request indefinitely. Bounds every
+# outgoing email (OTP included) to a sane worst case instead.
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT_SECONDS", "10"))
+# Brevo SMTP login + master key (NOT a mailbox password).
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")  # Gmail App Password, normal password nahi
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+# Must be a sender identity verified in the Brevo account.
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", f"CRM & Booking <{EMAIL_HOST_USER}>")
+# Reply-To for transactional mail (OTP). With Brevo the SMTP username is a
+# relay login, not a real mailbox, so reply-to falls back to the verified
+# From address rather than EMAIL_HOST_USER.
+EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", DEFAULT_FROM_EMAIL)
 SERVER_EMAIL = DEFAULT_FROM_EMAIL  # From address Django uses for mail_admins (core/alerting.py, F-9)
 
 # Real, owned destination for security alerts (SecurityFeatures.md F-9) —

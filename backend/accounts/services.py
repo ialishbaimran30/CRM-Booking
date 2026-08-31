@@ -189,10 +189,11 @@ def _build_otp_message(email, code):
     recipient; no cc/bcc is ever set, so settings.ADMINS (the
     security-alert mailbox) can never receive an OTP.
 
-    `reply_to=[EMAIL_HOST_USER]`: the same real, authenticated sending
-    address as From -- an explicit, monitored reply address rather than
+    `reply_to=[EMAIL_REPLY_TO]`: the verified sending address (defaults to
+    the From address) -- an explicit, monitored reply address rather than
     none at all (a minor, legitimate deliverability signal; it does not
-    disguise or change who the sender is).
+    disguise or change who the sender is). Decoupled from EMAIL_HOST_USER
+    because the Brevo SMTP username is a relay login, not a mailbox.
 
     `headers={"Message-ID": ...}` anchored to the real sending domain
     (gmail.com) instead of Django's default, which builds it from the
@@ -200,7 +201,7 @@ def _build_otp_message(email, code):
     is itself a low-trust signal to spam classifiers.
     """
     context = {"code": code, "ttl_minutes": EmailOTP.TTL_MINUTES, "email": email}
-    reply_to = [settings.EMAIL_HOST_USER] if settings.EMAIL_HOST_USER else None
+    reply_to = [settings.EMAIL_REPLY_TO] if settings.EMAIL_REPLY_TO else None
     message = EmailMultiAlternatives(
         subject="Your CRM & Booking verification code",
         body=render_to_string("emails/otp_code.txt", context),

@@ -656,8 +656,8 @@ class OtpEmailRecipientTests(TestCase):
         # Message-ID must be anchored to the real sending domain (gmail.com)
         # rather than Django's default -- the local/container hostname,
         # which is meaningless to any external mail system and is itself a
-        # low-trust signal to spam classifiers. Reply-To must be the same,
-        # real, authenticated sending address -- not absent, and not some
+        # low-trust signal to spam classifiers. Reply-To must be the
+        # configured verified sending address -- not absent, and not some
         # other identity.
         request_email_otp("headers@example.com")
         self._join_background_threads()
@@ -666,7 +666,7 @@ class OtpEmailRecipientTests(TestCase):
         sent = mail.outbox[0]
         message_id = sent.extra_headers.get("Message-ID", "")
         self.assertTrue(message_id.endswith("@gmail.com>"), message_id)
-        self.assertEqual(sent.reply_to, [settings.EMAIL_HOST_USER])
+        self.assertEqual(sent.reply_to, [settings.EMAIL_REPLY_TO])
 
     def test_otp_email_body_identifies_the_requested_address(self):
         # Legitimate content improvement: the message names the address it
